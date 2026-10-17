@@ -2,10 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   Activity, ArrowDownRight, ArrowRight, Check, ChevronDown, CircleAlert, Clock3,
-  Dumbbell, History, Play, Plus, RotateCcw, Search, ShieldCheck, Sparkles,
+  Download, Dumbbell, History, Play, Plus, RotateCcw, Search, ShieldCheck, Smartphone, Sparkles,
   Square, Trash2, Upload, Video, X,
 } from 'lucide-react'
 import type { PoseLandmarker } from '@mediapipe/tasks-vision'
+import { useRegisterSW } from 'virtual:pwa-register/react'
 import { categories, getSkill, skills } from './data/skills'
 import { formatTime, SkillAnalyzer } from './lib/analyzer'
 import { detectPose, loadPoseLandmarker } from './lib/pose'
@@ -15,6 +16,10 @@ import './App.css'
 
 type Screen = 'home' | 'select' | 'session' | 'report' | 'history'
 type MediaMode = 'camera' | 'upload'
+interface InstallPromptEvent extends Event {
+  prompt: () => Promise<void>
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>
+}
 
 const initialMetrics: LiveMetrics = { confidence: 0, validReps: 0, partialReps: 0, currentHold: 0, longestHold: 0, totalHold: 0 }
 const emptyReport = (): AnalysisReport => ({
@@ -45,6 +50,11 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [loadingMessage, setLoadingMessage] = useState('')
   const [error, setError] = useState('')
+  const [pwaError, setPwaError] = useState('')
+  const [offlineReady, setOfflineReady] = useState(false)
+  const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null)
+  const [appInstalled, setAppInstalled] = useState(false)
+  const [showInstallHelp, setShowInstallHelp] = useState(false)
   const [cameraActive, setCameraActive] = useState(false)
   const [cameraFacing, setCameraFacing] = useState<'environment' | 'user'>('environment')
   const [recording, setRecording] = useState(false)
@@ -76,6 +86,41 @@ function App() {
   const pausedRef = useRef(false)
   const countdownTimerRef = useRef<number | null>(null)
   const startedAtRef = useRef(0)
+
+  const {
+    needRefresh: [needRefresh, setNeedRefresh],
+    updateServiceWorker,
+  } = useRegisterSW({
+    immediate: true,
+    onOfflineReady: () => setOfflineReady(true),
+    onRegisterError: (reason: unknown) => {
+      console.error('Service worker registration failed.', reason)
+      setPwaError('Offline support could not be enabled. The app remains available online; check the secure HTTPS deployment.')
+    },
+  })
+
+  useEffect(() => {
+    const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches ||
+      (navigator as Navigator & { standalone?: boolean }).standalone === true
+    const syncInstalledState = () => setAppInstalled(isStandalone())
+    const onBeforeInstallPrompt = (event: Event) => {
+      event.preventDefault()
+      setInstallPrompt(event as InstallPromptEvent)
+    }
+    const onAppInstalled = () => {
+      setAppInstalled(true)
+      setInstallPrompt(null)
+      setShowInstallHelp(false)
+    }
+
+    syncInstalledState()
+    window.addEventListener('beforeinstallprompt', onBeforeInstallPrompt)
+    window.addEventListener('appinstalled', onAppInstalled)
+    return () => {
+      window.removeEventListener('beforeinstallprompt', onBeforeInstallPrompt)
+      window.removeEventListener('appinstalled', onAppInstalled)
+    }
+  }, [])
 
   useEffect(() => {
     listSessions().then((saved) => setSessions(saved.sort((a, b) => b.date.localeCompare(a.date)))).catch((reason: unknown) => {
@@ -146,6 +191,22 @@ function App() {
     stopInference()
     stopCamera()
     setScreen(destination)
+  }
+
+  const installApp = async () => {
+    if (!installPrompt) {
+      setShowInstallHelp((visible) => !visible)
+      return
+    }
+    try {
+      await installPrompt.prompt()
+      const choice = await installPrompt.userChoice
+      if (choice.outcome === 'accepted') setAppInstalled(true)
+      setInstallPrompt(null)
+    } catch (reason) {
+      console.error('App installation prompt failed.', reason)
+      setPwaError('The browser could not open its install prompt. Use the browser menu to install this app.')
+    }
   }
 
   const startCamera = async (facing: 'environment' | 'user' = cameraFacing) => {
@@ -435,9 +496,9 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <button className="brand" onClick={() => navigateTo('home')} aria-label="Calisthenics AI home">
+        <button className="brand" onClick={() => navigateTo('home')} aria-label="CaliTracker home">
           <span className="brand-mark"><Activity size={20} strokeWidth={2.5} /></span>
-          <span>CALISTHENICS<span className="brand-light">AI</span></span>
+          <span>CALITRACKER</span>
         </button>
         <div className="sidebar-label">WORKSPACE</div>
         <nav className="side-nav" aria-label="Main navigation">
@@ -460,9 +521,16 @@ function App() {
       <main className="main-area">
         <header className="topbar">
           <div className="breadcrumb"><span>TRAINING</span><span className="crumb-slash">/</span><strong>{screen === 'home' ? 'Overview' : screen === 'select' ? 'Skill library' : screen === 'session' ? 'New analysis' : screen === 'report' ? 'Session report' : 'Training log'}</strong></div>
-          <button className="topbar-cta" onClick={() => { setError(''); navigateTo('select') }}><Plus size={16} /> New analysis</button>
+          <div className="topbar-actions">
+            {!appInstalled && <button className="topbar-cta install-action" onClick={() => void installApp()} aria-label={installPrompt ? 'Install CaliTracker' : 'Show installation instructions'}><Download size={15} /><span>{installPrompt ? 'Install app' : 'Install'}</span></button>}
+            <button className="topbar-cta" onClick={() => { setError(''); navigateTo('select') }}><Plus size={16} /> New analysis</button>
+          </div>
         </header>
 
+        {showInstallHelp && !appInstalled && <div className="pwa-notice" role="status"><Smartphone size={17} /><span>To install, open this site’s browser menu and choose “Install app” or “Add to Home screen”. Installation requires HTTPS.</span><button aria-label="Dismiss installation instructions" onClick={() => setShowInstallHelp(false)}><X size={16} /></button></div>}
+        {offlineReady && <div className="pwa-notice" role="status"><ShieldCheck size={17} /><span>The app shell is available offline. Pose model files are cached after they are first loaded while online.</span><button aria-label="Dismiss offline status" onClick={() => setOfflineReady(false)}><X size={16} /></button></div>}
+        {needRefresh && <div className="pwa-notice" role="status"><RotateCcw size={17} /><span>An app update is ready. Finish any active recording before updating.</span><button className="pwa-update" onClick={() => void updateServiceWorker(true)} disabled={recording || analysisRunning || countdown > 0 || loading}>Update now</button><button aria-label="Dismiss update notice" onClick={() => setNeedRefresh(false)}><X size={16} /></button></div>}
+        {pwaError && <div className="global-alert" role="alert"><CircleAlert size={17} /><span>{pwaError}</span><button aria-label="Dismiss offline support error" onClick={() => setPwaError('')}><X size={16} /></button></div>}
         {error && <div className="global-alert" role="alert"><CircleAlert size={17} /><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError('')}><X size={16} /></button></div>}
 
         {screen === 'home' && (
@@ -606,7 +674,7 @@ function App() {
           </section>
         )}
 
-        <footer className="app-footer"><span>CALISTHENICS AI <i>·</i> TRAIN SMARTER, STAY GROUNDED</span><span>BUILT FOR MOVEMENT <Activity size={13} /></span></footer>
+        <footer className="app-footer"><span>CALITRACKER <i>·</i> TRAIN SMARTER, STAY GROUNDED</span><span>BUILT FOR MOVEMENT <Activity size={13} /></span></footer>
       </main>
     </div>
   )

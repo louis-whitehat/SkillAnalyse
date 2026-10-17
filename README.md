@@ -1,4 +1,4 @@
-# Calisthenics AI
+# CaliTracker
 
 A mobile-first, client-side calisthenics training analyzer built with React, TypeScript, Vite, MediaPipe Pose Landmarker, and IndexedDB.
 
@@ -19,6 +19,12 @@ npm run preview
 ```
 
 To deploy, publish the generated `dist/` directory to any static HTTPS host (for example, Cloudflare Pages, Netlify, or Vercel). No backend is required.
+
+## Install on a phone
+
+The production build includes a web app manifest, generated Android/Apple icons, and a Workbox service worker. Deploy `dist/` to Netlify over HTTPS, open the site in Chrome on Android, and choose **Install app** in the browser menu or use the in-app install button when Chrome offers it. On iOS, use Safari's **Share → Add to Home Screen**. The app shell is precached; the public MediaPipe model and matching WASM assets are cached after their first successful load. The app continues to process camera footage and uploaded videos on-device. The service worker does not cache user video, recordings, or IndexedDB training history.
+
+If the app icon source changes, run `npm run generate-pwa-assets` before building. To test offline support locally, run `npm run build` followed by `npm run preview`, load the preview once while online, and then use the browser's offline mode. Netlify builds require Node.js 20.19+ or 22.12+ as declared in `package.json`.
 
 ## Privacy and model setup
 
