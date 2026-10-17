@@ -1,0 +1,78 @@
+import type { CategoryId, Skill } from '../types'
+
+const definitions: Array<{
+  category: CategoryId
+  categoryName: string
+  entries: Array<[string, number, 'static' | 'dynamic' | 'combined', string, string, string[]]>
+}> = [
+  {
+    category: 'front-lever',
+    categoryName: 'Front lever',
+    entries: [
+      ['Tuck Front Lever', 1, 'static', 'Hold a compact horizontal tuck with straight arms and a braced trunk.', 'Side view; frame shoulders through hips and knees.', ['Shoulders depressed', 'Hips level with shoulders', 'Knees tucked symmetrically']],
+      ['Advanced Tuck Front Lever', 2, 'static', 'Open the tuck while keeping the trunk and thighs aligned.', 'Side view; full body in frame.', ['Straight elbows', 'No hip sag', 'Controlled tuck']],
+      ['One-Leg Front Lever', 3, 'static', 'Extend one leg while keeping the pelvis square and body horizontal.', 'Side view; show both legs clearly.', ['Level pelvis', 'Extended knee straight', 'Shoulders and hips aligned']],
+      ['Straddle Front Lever', 4, 'static', 'Hold a horizontal body line with legs straddled and knees extended.', 'Side view; include the full straddle.', ['Straight knees', 'Even leg separation', 'No hip sag']],
+      ['Full Front Lever', 5, 'static', 'Maintain a straight horizontal line from shoulders to ankles.', 'Side view; camera perpendicular to the body.', ['Straight body line', 'Locked elbows', 'No visible swinging']],
+      ['Front Lever Raises', 4, 'dynamic', 'Raise and lower through a controlled range without swinging.', 'Side view; capture the start and horizontal position.', ['Controlled range', 'Straight arms', 'No kip']],
+      ['Front Lever Pull-Ups', 5, 'dynamic', 'Pull from a front lever position while keeping the trunk rigid.', 'Side view; shoulders and elbows visible.', ['Elbow flexion', 'Stable body line', 'Controlled return']],
+    ],
+  },
+  {
+    category: 'handstand',
+    categoryName: 'Handstand',
+    entries: [
+      ['Wall Handstand', 1, 'static', 'Stack wrists, shoulders, hips and ankles while using the wall for support.', 'Side view; show hands and feet.', ['Shoulders open', 'Hips stacked', 'Straight knees']],
+      ['Freestanding Handstand', 3, 'static', 'Balance in a vertical line with small, controlled corrections.', 'Side view, slightly offset; full body visible.', ['Shoulder-hip-ankle stack', 'Quiet legs', 'Controlled balance']],
+      ['Handstand Balance Hold', 3, 'static', 'Maintain a stable freestanding line for the longest controlled hold.', 'Side view; keep the whole body in frame.', ['Vertical body line', 'Minimal sway', 'Active shoulders']],
+      ['Handstand Kick-Up', 2, 'dynamic', 'Kick up with control and finish in a balanced handstand.', 'Side view with clear floor and full body.', ['Controlled entry', 'Stacked finish', 'No uncontrolled arch']],
+      ['Handstand Walking', 4, 'dynamic', 'Travel through alternating hand placements while maintaining control.', 'Front or rear view; show both hands and feet.', ['Alternating hand steps', 'Shoulder control', 'Steady direction']],
+    ],
+  },
+  {
+    category: 'handstand-push-up',
+    categoryName: 'Handstand push-ups',
+    entries: [
+      ['Pike Push-Ups', 1, 'dynamic', 'Lower the head between the hands and press back to straight arms.', 'Side view; include hands, head and hips.', ['Elbow bend', 'Consistent depth', 'Controlled press']],
+      ['Elevated Pike Push-Ups', 2, 'dynamic', 'Press from an elevated pike while maintaining a stable shoulder position.', 'Side view; show elevation and full upper body.', ['Elbow tracking', 'Head reaches target depth', 'No bounce']],
+      ['Wall Handstand Push-Ups', 3, 'dynamic', 'Descend and press vertically with the wall supporting balance.', 'Side view; camera perpendicular to wall.', ['Controlled descent', 'Consistent bottom position', 'Full press']],
+      ['Deficit Handstand Push-Ups', 4, 'dynamic', 'Use the added range to reach a repeatable, controlled bottom position.', 'Side view; show blocks and head position.', ['Full range', 'Stable elbows', 'No uncontrolled drop']],
+      ['Freestanding Handstand Push-Ups', 5, 'dynamic', 'Perform a controlled vertical press without wall support.', 'Side view, slightly offset; full body visible.', ['Balance through range', 'Controlled depth', 'Stable lockout']],
+    ],
+  },
+  {
+    category: 'bent-arm-press',
+    categoryName: 'Bent-arm press to handstand',
+    entries: [
+      ['Tuck Bent-Arm Press to Handstand', 2, 'dynamic', 'Press from a compact tuck through a controlled bent-arm transition.', 'Side view; show the entire entry and finish.', ['Controlled shoulder lean', 'Compact tuck', 'Stable handstand finish']],
+      ['Straddle Bent-Arm Press to Handstand', 3, 'dynamic', 'Press with a wide straddle and controlled hip elevation.', 'Side view; full straddle visible.', ['Even straddle', 'Controlled transition', 'Stacked finish']],
+      ['Pike Bent-Arm Press to Handstand', 4, 'dynamic', 'Press with legs together and hips elevated through the transition.', 'Side view; show feet, hips and hands.', ['Hip elevation', 'Legs together', 'No uncontrolled kick']],
+      ['Full Bent-Arm Press to Handstand', 5, 'dynamic', 'Press through the bent-arm phase into a stable straight-body handstand.', 'Side view; full body visible throughout.', ['Controlled press', 'Straight finish', 'Minimal momentum']],
+    ],
+  },
+]
+
+export const skills: Skill[] = definitions.flatMap(({ category, categoryName, entries }) =>
+  entries.map(([name, level, type, description, camera, checkpoints], index) => ({
+    id: `${category}-${index + 1}`,
+    name,
+    category,
+    categoryName,
+    level,
+    type,
+    description,
+    camera,
+    checkpoints,
+    cues: checkpoints,
+  })),
+)
+
+export const categories = [
+  { id: 'all', label: 'All skills' },
+  { id: 'front-lever', label: 'Front lever' },
+  { id: 'handstand', label: 'Handstand' },
+  { id: 'handstand-push-up', label: 'HSPU' },
+  { id: 'bent-arm-press', label: 'Bent-arm press' },
+] as const
+
+export const getSkill = (id: string) => skills.find((skill) => skill.id === id)
