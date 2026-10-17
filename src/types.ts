@@ -1,4 +1,4 @@
-export type CategoryId = 'front-lever' | 'handstand' | 'handstand-push-up' | 'bent-arm-press'
+export type CategoryId = 'front-lever' | 'handstand' | 'handstand-push-up' | 'push-up' | 'bent-arm-press'
 export type SkillType = 'static' | 'dynamic' | 'combined'
 
 export interface Skill {
@@ -35,6 +35,8 @@ export interface AnalysisReport {
   positives: string[]
   suggestions: string[]
   timestampExamples: Array<{ time: number; issue: string }>
+  movementRange: 'not-applicable' | 'limited' | 'partial' | 'broad' | 'not-assessable'
+  limitations: string[]
 }
 
 export interface TrainingSession {

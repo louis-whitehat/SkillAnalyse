@@ -25,7 +25,16 @@ const initialMetrics: LiveMetrics = { confidence: 0, validReps: 0, partialReps: 
 const emptyReport = (): AnalysisReport => ({
   score: null, confidence: 0, insufficientConfidence: true, framesAnalyzed: 0, validReps: 0, partialReps: 0,
   longestHold: 0, totalHold: 0, repConfidence: [], criteria: [], issues: [], positives: [], suggestions: [], timestampExamples: [],
+  movementRange: 'not-assessable', limitations: [],
 })
+const movementRangeLabels: Record<AnalysisReport['movementRange'], string> = {
+  'not-applicable': 'Not assessed',
+  'not-assessable': 'Insufficient evidence',
+  limited: 'Limited visible change',
+  partial: 'Partial visible change',
+  broad: 'Broad visible change',
+}
+const movementRangeLabel = (range: AnalysisReport['movementRange'] | undefined) => range ? movementRangeLabels[range] : 'Not recorded'
 const errorMessage = (reason: unknown) => reason instanceof Error ? reason.message : String(reason)
 const navItems = [
   { id: 'home' as const, label: 'Overview', icon: Activity },
@@ -38,6 +47,7 @@ function App() {
   const [screen, setScreen] = useState<Screen>('home')
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null)
   const [category, setCategory] = useState<string>('all')
+  const [difficulty, setDifficulty] = useState('all')
   const [query, setQuery] = useState('')
   const [targetReps, setTargetReps] = useState(5)
   const [targetHold, setTargetHold] = useState(20)
@@ -149,8 +159,9 @@ function App() {
 
   const filteredSkills = useMemo(() => skills.filter((skill) =>
     (category === 'all' || skill.category === category) &&
+    (difficulty === 'all' || (difficulty === 'beginner' ? skill.level <= 2 : difficulty === 'intermediate' ? skill.level === 3 : skill.level >= 4)) &&
     `${skill.name} ${skill.categoryName}`.toLowerCase().includes(query.toLowerCase()),
-  ), [category, query])
+  ), [category, difficulty, query])
 
   const recentSessions = sessions.slice(0, 4)
   const bestScore = sessions.reduce((best, session) => Math.max(best, session.report.score ?? 0), 0)
@@ -492,6 +503,13 @@ function App() {
   useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl) }, [videoUrl])
   const poseVideoWidth = poseVideoSize.width || 1
   const poseVideoHeight = poseVideoSize.height || 1
+  const activeSkill = activeSession ? getSkill(activeSession.skillId) : undefined
+  const reportLimitations = activeSession
+    ? activeSession.report.limitations ?? ['This saved report predates detailed measurement limits. Treat 2D pose scores as estimates, not verified exercise recognition.']
+    : []
+  const recentSkillSessions = activeSession
+    ? sessions.filter((session) => session.skillId === activeSession.skillId && session.id !== activeSession.id).slice(0, 3)
+    : []
 
   return (
     <div className="app-shell">
@@ -569,6 +587,7 @@ function App() {
           <section className="page-content">
             <div className="page-heading"><div><div className="eyebrow">BUILD YOUR SESSION</div><h1>Choose your <em>skill.</em></h1><p className="lede">Select a specific progression before recording. Each skill has its own movement checks.</p></div></div>
             <div className="library-tools"><label className="search-field"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search skills…" aria-label="Search skills" />{query && <button onClick={() => setQuery('')} aria-label="Clear search"><X size={15} /></button>}</label>
+              <label className="difficulty-filter"><span>DIFFICULTY</span><select aria-label="Filter by difficulty" value={difficulty} onChange={(event) => setDifficulty(event.target.value)}><option value="all">All levels</option><option value="beginner">Beginner · 1–2</option><option value="intermediate">Intermediate · 3</option><option value="advanced">Advanced · 4–5</option></select></label>
               <div className="category-pills">{categories.map((item) => <button key={item.id} className={category === item.id ? 'selected' : ''} onClick={() => setCategory(item.id)}>{item.label}</button>)}</div>
             </div>
             {categories.filter((item) => item.id !== 'all' && (category === 'all' || category === item.id)).map((item) => {
@@ -578,7 +597,7 @@ function App() {
                 {group.map((skill) => <SkillCard key={skill.id} skill={skill} onChoose={() => chooseSkill(skill)} />)}
               </div></div>
             })}
-            {filteredSkills.length === 0 && <EmptyState title="No matching skills" text="Try a different search term or category." action="Clear filters" onClick={() => { setQuery(''); setCategory('all') }} />}
+            {filteredSkills.length === 0 && <EmptyState title="No matching skills" text="Try a different search term, category or difficulty." action="Clear filters" onClick={() => { setQuery(''); setCategory('all'); setDifficulty('all') }} />}
           </section>
         )}
 
@@ -602,6 +621,7 @@ function App() {
                   {recording && <div className="recording-clock"><span className="recording-dot" /> REC&nbsp; {formatTime(elapsed)}</div>}
                   {analysisRunning && <div className="live-metric-chip">{selectedSkill.type === 'dynamic' ? <><span>REPS</span><strong>{metrics.validReps}</strong></> : <><span>HOLD</span><strong>{formatTime(metrics.currentHold)}</strong></>}</div>}
                 </div>
+                {analysisRunning && metrics.confidence < 0.3 && <div className="perspective-warning" role="status"><CircleAlert size={15} /><span>Pose landmarks are difficult to read. Adjust lighting and framing; recommended view: {selectedSkill.camera}</span></div>}
                 <div className="camera-controls">
                   {mediaMode === 'camera' ? <>
                     <button className="camera-switch" onClick={() => void startCamera(cameraFacing === 'environment' ? 'user' : 'environment')} disabled={!cameraActive || recording || loading}><RotateCcw size={16} /> Flip camera</button>
@@ -638,22 +658,33 @@ function App() {
 
         {screen === 'report' && activeSession && (
           <section className="page-content report-page">
-            <div className="report-top"><div><button className="back-link" onClick={showHistory}>← Training log</button><div className="eyebrow">SESSION COMPLETE · {new Date(activeSession.date).toLocaleDateString(undefined, { dateStyle: 'medium' })}</div><h1>{activeSession.skillName}</h1><p className="lede">Your analysis is ready. Treat 2D estimates as training feedback, not a precise biomechanical measurement.</p><p className="report-settings">{getSkill(activeSession.skillId)?.type === 'dynamic' ? `${activeSession.settings.targetReps} rep target · ` : ''}{activeSession.settings.measureHold ? `${activeSession.settings.targetHold}s hold target · ±${activeSession.settings.positionTolerance}° tolerance` : 'hold timer off'} · {activeSession.settings.smoothingStrength}% smoothing{activeSession.settings.focus ? ` · Focus: ${activeSession.settings.focus}` : ''}</p></div><button className="button-primary" onClick={resetWorkflow}><RotateCcw size={16} /> Analyze again</button></div>
-            {activeSession.report.insufficientConfidence && <div className="confidence-alert"><CircleAlert size={18} /><div><strong>Not enough reliable pose evidence for a score</strong><span>Try brighter lighting, a steady side-on camera and a fully visible body. No score was invented.</span></div></div>}
+            <div className="report-top"><div><button className="back-link" onClick={showHistory}>← Training log</button><div className="eyebrow">SESSION COMPLETE · {new Date(activeSession.date).toLocaleDateString(undefined, { dateStyle: 'medium' })}</div><h1>{activeSession.skillName}</h1><p className="lede">Your analysis is ready. Treat 2D estimates as training feedback, not a precise biomechanical measurement.</p><p className="report-settings">{activeSkill?.type === 'dynamic' ? `${activeSession.settings.targetReps} rep target · ` : ''}{activeSession.settings.measureHold ? `${activeSession.settings.targetHold}s hold target · ±${activeSession.settings.positionTolerance}° tolerance` : 'hold timer off'} · {activeSession.settings.smoothingStrength}% smoothing{activeSession.settings.focus ? ` · Focus: ${activeSession.settings.focus}` : ''}</p></div><button className="button-primary" onClick={resetWorkflow}><RotateCcw size={16} /> Analyze again</button></div>
+            <div className="analysis-context panel"><div><span className="eyebrow">SELECTED EXERCISE</span><strong>{activeSession.skillName}</strong><small>{activeSkill?.categoryName ?? 'Calisthenics'} · Level {activeSkill?.level ?? '—'} · Exercise identity is selected, not independently recognized by the camera.</small></div>{activeSkill && <p><Video size={15} /> Recommended view: {activeSkill.camera}</p>}</div>
+            {activeSession.report.insufficientConfidence && <div className="confidence-alert"><CircleAlert size={18} /><div><strong>Not enough reliable pose evidence for a score</strong><span>Check lighting and framing. Recommended view: {activeSkill?.camera ?? 'keep the full body visible'}. No score was invented.</span></div></div>}
             <div className="report-summary">
               <div className="score-card panel"><div className="eyebrow">TECHNIQUE SCORE</div><div className={`score-number ${activeSession.report.score === null ? 'no-score' : ''}`}>{activeSession.report.score ?? '—'}<small>{activeSession.report.score !== null && '/100'}</small></div><div className="score-caption">{activeSession.report.score === null ? 'Insufficient confidence' : 'Estimated from visible pose frames'}</div><div className="score-bar"><i style={{ width: `${activeSession.report.score ?? 0}%` }} /></div><div className="score-foot"><span>POSE CONFIDENCE</span><strong>{activeSession.report.confidence}%</strong></div></div>
               <div className="result-metrics panel">
-                <Metric label="Valid repetitions" value={String(activeSession.report.validReps)} helper={`Partial / incomplete · ${activeSession.report.partialReps}`} icon={<Activity size={17} />} />
-                <Metric label="Longest valid hold" value={formatTime(activeSession.report.longestHold)} helper="Continuous qualified position" icon={<Clock3 size={17} />} />
-                <Metric label="Total valid hold" value={formatTime(activeSession.report.totalHold)} helper={`${activeSession.report.framesAnalyzed} pose frames analyzed`} icon={<ShieldCheck size={17} />} />
+                {activeSkill?.type === 'dynamic' ? <>
+                  <Metric label="Detected repetitions" value={String(activeSession.report.validReps)} helper={`Incomplete phases · ${activeSession.report.partialReps}`} icon={<Activity size={17} />} />
+                  {activeSession.report.movementRange !== 'not-applicable' && <Metric label="Observed elbow movement" value={movementRangeLabel(activeSession.report.movementRange)} helper="Approximate 2D angle change; not a physical range measurement." icon={<ArrowDownRight size={17} />} />}
+                  <Metric label="Pose frames analyzed" value={String(activeSession.report.framesAnalyzed)} helper={`Mean landmark confidence · ${activeSession.report.confidence}%`} icon={<ShieldCheck size={17} />} />
+                </> : <>
+                  <Metric label="Longest valid hold" value={formatTime(activeSession.report.longestHold)} helper="Continuous qualified position" icon={<Clock3 size={17} />} />
+                  <Metric label="Total valid hold" value={formatTime(activeSession.report.totalHold)} helper="Time in the estimated target position" icon={<ShieldCheck size={17} />} />
+                  <Metric label="Pose frames analyzed" value={String(activeSession.report.framesAnalyzed)} helper={`Mean landmark confidence · ${activeSession.report.confidence}%`} icon={<Activity size={17} />} />
+                </>}
               </div>
               {activeSession.video && videoUrl && <div className="report-video panel"><div className="panel-heading"><div><div className="eyebrow">SESSION RECORDING</div><h2>Review your movement</h2></div></div><video controls playsInline src={videoUrl} /></div>}
             </div>
+            {reportLimitations.length > 0 && <div className="analysis-limitations panel"><div className="eyebrow"><CircleAlert size={14} /> MEASUREMENT LIMITS</div>{reportLimitations.map((limitation) => <p key={limitation}>{limitation}</p>)}</div>}
             <div className="report-details">
               <div className="panel criteria-panel"><div className="panel-heading"><div><div className="eyebrow">SKILL-SPECIFIC BREAKDOWN</div><h2>Technique signals</h2></div></div>
                 {activeSession.report.criteria.length ? <div className="criteria-list">{activeSession.report.criteria.map((criterion) => <div className="criterion" key={criterion.name}><div className="criterion-top"><div><strong>{criterion.name}</strong><small>{criterion.detail}</small></div><b>{activeSession.report.score === null ? '—' : criterion.score}</b></div><div className="criterion-bar"><i style={{ width: `${activeSession.report.score === null ? 0 : criterion.score}%` }} /></div></div>)}</div> : <p className="muted-text">No pose frames were recorded for this session.</p>}
                 {activeSession.report.repConfidence.length > 0 && <div className="rep-confidence"><strong>REP LANDMARK CONFIDENCE</strong><div>{activeSession.report.repConfidence.map((confidence, index) => <span key={`${index}-${confidence}`}>#{index + 1} <b>{Math.round(confidence * 100)}%</b></span>)}</div><small>Visibility confidence at each completed rep; not a form-quality score.</small></div>}
               </div>
+              <section className="recent-attempts panel"><div className="panel-heading"><div><div className="eyebrow">PERSONAL TREND</div><h2>Recent {activeSession.skillName} attempts</h2></div></div>
+                {recentSkillSessions.length ? <div className="attempt-list">{recentSkillSessions.map((session) => <button className="attempt-row" key={session.id} onClick={() => openSession(session)}><span>{new Date(session.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span><strong>{activeSkill?.type === 'dynamic' ? `${session.report.validReps} reps` : formatTime(session.report.longestHold)}</strong><small>{session.report.score === null ? 'No reliable score' : `Estimated score · ${session.report.score}/100`}</small><ArrowRight size={15} /></button>)}</div> : <p>No earlier attempts for this exercise have been saved on this device.</p>}
+              </section>
               <div className="panel notes-panel"><div className="eyebrow">COACHING NOTES</div><h2>What we noticed</h2>
                 <div className="note-section"><strong className="note-positive">GOOD SIGNALS</strong>{activeSession.report.positives.map((item) => <p key={item}><Check size={14} />{item}</p>)}</div>
                 {activeSession.report.issues.length > 0 && <div className="note-section"><strong className="note-warning">AREAS TO REVIEW</strong>{activeSession.report.issues.map((item) => { const example = activeSession.report.timestampExamples.find((entry) => entry.issue === item); return <p key={item}><ArrowDownRight size={14} />{example && <time className="issue-timestamp">{formatTime(example.time)}</time>}{item}</p> })}</div>}
@@ -710,7 +741,8 @@ function SessionRow({ session, onClick }: { session: TrainingSession; onClick: (
 }
 
 function SkillCard({ skill, onChoose }: { skill: Skill; onChoose: () => void }) {
-  return <button className="skill-card panel" onClick={onChoose}><div className="skill-card-top"><span className={`skill-type ${skill.type}`}>{skill.type}</span><span className="level-label">LEVEL <b>{skill.level}</b></span></div><h3>{skill.name}</h3><p>{skill.description}</p><div className="skill-card-bottom"><span>{skill.categoryName}</span><span className="skill-select">Select <ArrowRight size={14} /></span></div></button>
+  const difficulty = skill.level <= 2 ? 'Beginner' : skill.level === 3 ? 'Intermediate' : 'Advanced'
+  return <button className="skill-card panel" onClick={onChoose}><div className="skill-card-top"><span className={`skill-type ${skill.type}`}>{skill.type}</span><span className="level-label">{difficulty} · <b>Level {skill.level}</b></span></div><h3>{skill.name}</h3><p>{skill.description}</p><div className="skill-card-bottom"><span>{skill.categoryName}</span><span className="skill-select">Select <ArrowRight size={14} /></span></div></button>
 }
 
 function Metric({ label, value, helper, icon }: { label: string; value: string; helper: string; icon: ReactNode }) {

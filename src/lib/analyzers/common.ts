@@ -30,10 +30,13 @@ export const frameConfidence = (points: PosePoint[]) =>
 
 export function jointAngles(points: PosePoint[]) {
   const p = landmark
+  const leftElbow = angle(points[p.leftShoulder], points[p.leftElbow], points[p.leftWrist])
+  const rightElbow = angle(points[p.rightShoulder], points[p.rightElbow], points[p.rightWrist])
   return {
     knee: (angle(points[p.leftHip], points[p.leftKnee], points[p.leftAnkle]) + angle(points[p.rightHip], points[p.rightKnee], points[p.rightAnkle])) / 2,
     hip: (angle(points[p.leftShoulder], points[p.leftHip], points[p.leftKnee]) + angle(points[p.rightShoulder], points[p.rightHip], points[p.rightKnee])) / 2,
-    elbow: (angle(points[p.leftShoulder], points[p.leftElbow], points[p.leftWrist]) + angle(points[p.rightShoulder], points[p.rightElbow], points[p.rightWrist])) / 2,
+    elbow: (leftElbow + rightElbow) / 2,
+    elbowAsymmetry: Math.abs(leftElbow - rightElbow),
   }
 }
 

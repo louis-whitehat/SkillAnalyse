@@ -3,6 +3,7 @@ import { analyzeBentArmPress } from './bentArmPress'
 import { analyzeFrontLever } from './frontLever'
 import { analyzeHandstand } from './handstand'
 import { analyzeHandstandPushUp } from './handstandPushUp'
+import { analyzePushUp } from './pushUp'
 import type { SkillFrame } from './types'
 
 export function analyzeSkillFrame(skill: Skill, points: PosePoint[]): SkillFrame {
@@ -13,6 +14,8 @@ export function analyzeSkillFrame(skill: Skill, points: PosePoint[]): SkillFrame
       return analyzeHandstand(points)
     case 'handstand-push-up':
       return analyzeHandstandPushUp(points)
+    case 'push-up':
+      return analyzePushUp(points)
     case 'bent-arm-press':
       return analyzeBentArmPress(points)
   }

@@ -14,6 +14,7 @@ export function analyzeFrontLever(points: PosePoint[]): SkillFrame {
     kneeAngle: joints.knee,
     hipAngle: joints.hip,
     elbowAngle: joints.elbow,
+    elbowAsymmetry: joints.elbowAsymmetry,
     frontLine: body.frontLine,
     verticalDeviation: body.verticalDeviation,
   }

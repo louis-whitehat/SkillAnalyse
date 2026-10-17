@@ -8,6 +8,7 @@ export interface SkillFrame {
   kneeAngle: number
   hipAngle: number
   elbowAngle: number
+  elbowAsymmetry: number
   frontLine: number
   verticalDeviation: number
 }

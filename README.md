@@ -1,6 +1,6 @@
 # CaliTracker
 
-A mobile-first, client-side calisthenics training analyzer built with React, TypeScript, Vite, MediaPipe Pose Landmarker, and IndexedDB.
+A mobile-first, client-side calisthenics skill analyzer built with React, TypeScript, Vite, MediaPipe Pose Landmarker, and IndexedDB. The skill library covers handstands, front levers, handstand push-up progressions, bent-arm presses, and push-up variations, with category, difficulty, and text filters.
 
 ## Run locally
 
@@ -34,7 +34,7 @@ The camera uses `getUserMedia()` and recordings use `MediaRecorder` when support
 
 ## What the analysis means
 
-Pose detection uses actual MediaPipe landmarks. Separate front lever, handstand, handstand push-up, and bent-arm press analyzers estimate body-line alignment and joint extension from 2D landmarks. The rep counters use joint-angle phases for push/pull exercises, body-line phases for front lever raises and press entries, and wrist displacement events for handstand walking. Hold qualification has configurable position tolerance and smoothing strength.
+Pose detection uses actual MediaPipe landmarks. Separate front lever, handstand, handstand push-up, push-up, and bent-arm press analyzers estimate body-line alignment and joint extension from 2D landmarks. Push-up repetitions use elbow-angle phases; estimated body-line alignment, visible elbow-angle asymmetry, and observed elbow movement are provided as camera-dependent signals. The rep counters use joint-angle phases for push/pull exercises, body-line phases for front lever raises and press entries, and wrist displacement events for handstand walking. Hold qualification has configurable position tolerance and smoothing strength. The camera does not independently recognize the selected exercise: push-up hand spacing, elevation, claps, one-arm loading and other variations are not reliably classified. Results identify the selected exercise and clearly list measurement limits rather than claiming visual recognition.
 
 These are coaching estimates, not a validated biomechanical assessment. A single 2D view cannot reliably measure depth, rotation, balance, or every 3D movement; camera angle, occlusion, lighting, clothing, and tracking confidence affect results. A score is withheld when pose evidence is insufficient. Counts and scores should be reviewed against the video, especially for skills whose movement is not well represented by the recommended camera view.
 

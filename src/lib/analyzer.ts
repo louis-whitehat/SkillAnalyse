@@ -11,6 +11,7 @@ interface Sample {
   alignment: number
   symmetry: number
   jointExtension: number
+  elbowAngle: number
 }
 
 export class SkillAnalyzer {
@@ -20,7 +21,7 @@ export class SkillAnalyzer {
   private validReps = 0
   private partialReps = 0
   private repConfidence: number[] = []
-  private phase: 'ready' | 'lowered' | 'returning' = 'ready'
+  private phase: 'ready' | 'lowered' | 'returning' | 'awaiting-bottom' = 'ready'
   private repStarted = 0
   private partialRepTimes: number[] = []
   private currentHold = 0
@@ -51,7 +52,7 @@ export class SkillAnalyzer {
     this.smoothedAlignment = this.smoothedAlignment === undefined
       ? alignment
       : this.smoothedAlignment * (this.settings.smoothingStrength / 100) + alignment * (1 - this.settings.smoothingStrength / 100)
-    const sample: Sample = { time, confidence, alignment, symmetry, jointExtension }
+    const sample: Sample = { time, confidence, alignment, symmetry, jointExtension, elbowAngle: frame.elbowAngle }
     this.samples.push(sample)
 
     const dt = this.previousTime === undefined ? 0 : Math.max(0, Math.min(0.5, time - this.previousTime))
@@ -85,9 +86,9 @@ export class SkillAnalyzer {
     const isFrontRaise = this.skill.name === 'Front Lever Raises'
     const isPullUp = this.skill.name.includes('Pull-Ups')
     const isHandstandWalk = this.skill.name === 'Handstand Walking'
-    const elbowDriven = this.skill.category === 'handstand-push-up' || isPullUp
-    const bottom = isPress ? hipAngle < 115 : isKickUp ? verticalDeviation > 30 : isFrontRaise ? frontLine > 55 : elbowDriven ? elbowAngle < 100 : elbowAngle < 100
-    const top = isPress ? hipAngle > 150 : isKickUp ? verticalDeviation < 20 : isFrontRaise ? frontLine < 25 : elbowDriven ? elbowAngle > 145 : elbowAngle > 145
+    const elbowDriven = this.skill.category === 'handstand-push-up' || this.skill.category === 'push-up' || isPullUp
+    const bottom = isPress ? hipAngle < 115 : isKickUp ? verticalDeviation > 30 : isFrontRaise ? frontLine > 55 : elbowDriven ? elbowAngle < 95 : elbowAngle < 100
+    const top = isPress ? hipAngle > 150 : isKickUp ? verticalDeviation < 20 : isFrontRaise ? frontLine < 25 : elbowDriven ? elbowAngle > 150 : elbowAngle > 145
     if (isHandstandWalk) {
       const left = points[landmark.leftWrist]
       const right = points[landmark.rightWrist]
@@ -104,36 +105,33 @@ export class SkillAnalyzer {
       }
       return
     }
-    if (this.phase === 'ready' && (isPress || isKickUp ? bottom : top)) {
-      this.phase = 'lowered'
-      this.repStarted = time
-    } else if (this.phase === 'lowered' && (isPress || isKickUp ? top : bottom) && time - this.repStarted > 0.25) {
-      if (isPress || isKickUp) {
-        if (time - this.repStarted > 0.5) {
-          this.validReps += 1
-          this.repConfidence.push(frame.confidence)
-        }
-        else {
-          this.partialReps += 1
-          this.partialRepTimes.push(time)
-        }
-        this.phase = 'ready'
-      } else this.phase = 'returning'
-    } else if (this.phase === 'returning' && top) {
+    const startsAtBottom = isPress || isKickUp
+    const completeRep = () => {
       if (time - this.repStarted > 0.5) {
         this.validReps += 1
         this.repConfidence.push(frame.confidence)
-      }
-      else {
+      } else {
         this.partialReps += 1
         this.partialRepTimes.push(time)
       }
-      this.phase = 'ready'
+      this.phase = 'awaiting-bottom'
     }
-    if (this.phase !== 'ready' && time - this.repStarted > 12) {
+    if (this.phase === 'awaiting-bottom' && bottom) {
+      this.phase = startsAtBottom ? 'lowered' : 'returning'
+      this.repStarted = time
+    } else if (this.phase === 'ready' && (startsAtBottom ? bottom : top)) {
+      this.phase = 'lowered'
+      this.repStarted = time
+    } else if (this.phase === 'lowered' && (startsAtBottom ? top : bottom) && time - this.repStarted > 0.25) {
+      if (startsAtBottom) completeRep()
+      else this.phase = 'returning'
+    } else if (this.phase === 'returning' && top) {
+      completeRep()
+    }
+    if ((this.phase === 'lowered' || this.phase === 'returning') && time - this.repStarted > 12) {
       this.partialReps += 1
       this.partialRepTimes.push(time)
-      this.phase = 'ready'
+      this.phase = 'awaiting-bottom'
     }
   }
 
@@ -149,12 +147,28 @@ export class SkillAnalyzer {
   }
 
   report(): AnalysisReport {
-    const partialReps = this.partialReps + (this.skill.type === 'dynamic' && this.phase !== 'ready' ? 1 : 0)
+    const partialReps = this.partialReps + (this.phase === 'lowered' || this.phase === 'returning' ? 1 : 0)
     const confidence = avg(this.samples.map((sample) => sample.confidence))
     const alignment = avg(this.samples.map((sample) => sample.alignment))
     const symmetry = avg(this.samples.map((sample) => sample.symmetry))
-    const joint = avg(this.samples.map((sample) => sample.jointExtension))
+    const elbowAngles = this.samples.map((sample) => sample.elbowAngle)
+    const minimumElbowAngle = elbowAngles.reduce((minimum, angle) => Math.min(minimum, angle), 180)
+    const maximumElbowAngle = elbowAngles.reduce((maximum, angle) => Math.max(maximum, angle), 0)
+    const isPushUp = this.skill.category === 'push-up'
+    const joint = isPushUp
+      ? clamp(100 - Math.max(0, 165 - maximumElbowAngle) * 2)
+      : avg(this.samples.map((sample) => sample.jointExtension))
     const enoughEvidence = this.samples.length >= 12 && confidence >= 0.45
+    const measuresElbowRange = this.skill.category === 'push-up' || this.skill.category === 'handstand-push-up'
+    const movementRange: AnalysisReport['movementRange'] = !measuresElbowRange
+      ? 'not-applicable'
+      : !enoughEvidence || elbowAngles.length === 0
+        ? 'not-assessable'
+        : maximumElbowAngle - minimumElbowAngle < 35
+          ? 'limited'
+          : maximumElbowAngle - minimumElbowAngle < 65
+            ? 'partial'
+            : 'broad'
     const alignmentVariance = avg(this.samples.map((sample) => (sample.alignment - alignment) ** 2))
     const stability = clamp(100 - Math.sqrt(alignmentVariance) * 2)
     const movement = this.skill.type === 'dynamic'
@@ -163,12 +177,13 @@ export class SkillAnalyzer {
         ? (clamp((this.longestHold / this.settings.targetHold) * 100) + stability) / 2
         : stability
     const criteria = [
-      { name: 'Body alignment', score: Math.round(alignment), detail: 'Estimated from 2D shoulder, hip and ankle landmarks.' },
-      { name: 'Joint position', score: Math.round(joint), detail: 'Estimated joint extension; camera perspective affects angles.' },
-      { name: 'Control & stability', score: Math.round(symmetry), detail: 'A rough proxy from visible left-right landmark consistency.' },
+      { name: isPushUp ? 'Body line & hip position' : 'Body alignment', score: Math.round(alignment), detail: isPushUp ? 'Estimated from the visible shoulder-to-ankle line in a side view.' : 'Estimated from 2D shoulder, hip and ankle landmarks.' },
+      { name: isPushUp ? 'Elbow position' : 'Joint position', score: Math.round(joint), detail: 'Estimated joint extension; camera perspective affects angles.' },
+      { name: isPushUp ? 'Visible elbow symmetry' : 'Control & stability', score: Math.round(symmetry), detail: isPushUp ? 'Compares left/right elbow angles; a side-on view may hide asymmetry.' : 'A rough proxy from visible left-right landmark consistency.' },
       { name: this.skill.type === 'dynamic' ? 'Movement completion' : 'Hold consistency', score: Math.round(movement), detail: this.skill.type === 'dynamic' ? 'Based on detected movement phases and the configured rep target.' : 'Combines frame-to-frame alignment stability and target-hold attainment.' },
     ]
-    const weights = this.skill.category === 'front-lever' ? [0.45, 0.15, 0.2, 0.2]
+    const weights = this.skill.category === 'push-up' ? [0.35, 0.2, 0.2, 0.25]
+      : this.skill.category === 'front-lever' ? [0.45, 0.15, 0.2, 0.2]
       : this.skill.category === 'handstand' ? [0.4, 0.15, 0.3, 0.15]
         : this.skill.category === 'handstand-push-up' ? [0.15, 0.35, 0.2, 0.3]
           : [0.25, 0.2, 0.2, 0.35]
@@ -176,15 +191,20 @@ export class SkillAnalyzer {
       ? Math.round(criteria.reduce((total, criterion, index) => total + criterion.score * weights[index], 0))
       : null
     const issues: string[] = []
-    if (enoughEvidence && alignment < 65) issues.push(this.skill.category === 'front-lever' ? 'Hips appear to drop below the shoulder-to-ankle line.' : 'Body line drifts from vertical during the analyzed frames.')
-    if (enoughEvidence && joint < 65) issues.push('Visible knee or elbow extension appears inconsistent.')
-    if (enoughEvidence && symmetry < 65) issues.push('Left and right side landmarks appear uneven; check camera angle and symmetry.')
+    if (enoughEvidence && alignment < 65) issues.push(isPushUp
+      ? 'The shoulder-to-ankle line changes or the hips appear to sag during the visible repetitions.'
+      : this.skill.category === 'front-lever' ? 'Hips appear to drop below the shoulder-to-ankle line.' : 'Body line drifts from vertical during the analyzed frames.')
+    if (enoughEvidence && joint < 65) issues.push(isPushUp ? 'The elbows do not consistently reach a visibly extended top position.' : 'Visible knee or elbow extension appears inconsistent.')
+    if (enoughEvidence && symmetry < 65) issues.push(isPushUp
+      ? 'The visible left and right elbow angles differ; confirm from a front-oblique camera view.'
+      : 'Left and right side landmarks appear uneven; check camera angle and symmetry.')
+    if (enoughEvidence && isPushUp && movementRange === 'limited') issues.push('Only a limited elbow-angle change was visible; the camera may not have captured the full push-up range.')
     if (partialReps > 0) issues.push(`${partialReps} movement phase${partialReps === 1 ? '' : 's'} did not meet the completion criteria.`)
     const positives = enoughEvidence
       ? [alignment >= 75 ? 'Good body-line alignment in the visible frames.' : 'A clear baseline is available for tracking body-line changes.', confidence >= 0.7 ? 'Landmark visibility was strong for most analyzed frames.' : 'Some pose landmarks were visible throughout the attempt.']
       : ['No reliable technique judgment was produced; improve framing and lighting before comparing results.']
     const suggestions = [
-      alignment < 75 ? 'Record from the recommended side angle and keep your full body in frame.' : `Keep practicing ${this.skill.name.toLowerCase()} with the same camera setup for comparable results.`,
+      alignment < 75 ? `Record from the recommended angle: ${this.skill.camera.toLowerCase()}` : `Keep practicing ${this.skill.name.toLowerCase()} with the same camera setup for comparable results.`,
       joint < 75 ? 'Prioritize a controlled range and pause briefly at the positions you want to own.' : 'Use a slower tempo to make technique changes easier to verify.',
       confidence < 0.65 ? 'Improve lighting and avoid covering joints with clothing or equipment.' :       `Focus on: ${(this.settings.focus || this.skill.checkpoints[0]).toLowerCase()}.`,
     ]
@@ -199,6 +219,12 @@ export class SkillAnalyzer {
       const time = sample?.time ?? (issue.includes('movement phase') ? this.partialRepTimes[0] ?? this.samples[this.samples.length - 1]?.time : undefined)
       return time === undefined ? [] : [{ time, issue }]
     })
+    const limitations = [
+      'The selected exercise name comes from your selection; this single-camera pose model does not independently identify or verify the exercise variation.',
+      '2D landmarks cannot reliably measure depth, contact with a wall or floor, force, or rotation. Camera angle and occlusion affect feedback.',
+      ...(isPushUp ? ['Hand spacing, foot elevation, claps, lateral travel, and true one-arm loading are not reliably classified. Rep counts use visible elbow-angle phases and can miss or miscount variations.'] : []),
+      ...(!enoughEvidence ? ['There were too few confident pose frames to make a reliable technique assessment.'] : []),
+    ]
     return {
       score,
       confidence: Math.round(confidence * 100),
@@ -214,6 +240,8 @@ export class SkillAnalyzer {
       positives,
       suggestions,
       timestampExamples,
+      movementRange,
+      limitations,
     }
   }
 }
