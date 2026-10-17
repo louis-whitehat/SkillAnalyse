@@ -29,6 +29,7 @@ export interface AnalysisReport {
   partialReps: number
   longestHold: number
   totalHold: number
+  repConfidence: number[]
   criteria: Criterion[]
   issues: string[]
   positives: string[]
@@ -48,6 +49,8 @@ export interface TrainingSession {
     measureHold: boolean
     targetHold: number
     focus: string
+    positionTolerance: number
+    smoothingStrength: number
   }
   video?: Blob
 }

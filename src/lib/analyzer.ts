@@ -1,17 +1,7 @@
 import type { AnalysisReport, LiveMetrics, PosePoint, Skill } from '../types'
+import { landmark } from './analyzers/common'
+import { analyzeSkillFrame } from './analyzers'
 
-const P = { leftShoulder: 11, rightShoulder: 12, leftElbow: 13, rightElbow: 14, leftWrist: 15, rightWrist: 16, leftHip: 23, rightHip: 24, leftKnee: 25, rightKnee: 26, leftAnkle: 27, rightAnkle: 28 } as const
-type Point = { x: number; y: number }
-
-const midpoint = (a: Point, b: Point): Point => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 })
-const angle = (a: Point, b: Point, c: Point) => {
-  const bax = a.x - b.x
-  const bay = a.y - b.y
-  const bcx = c.x - b.x
-  const bcy = c.y - b.y
-  const cosine = (bax * bcx + bay * bcy) / (Math.hypot(bax, bay) * Math.hypot(bcx, bcy))
-  return Math.acos(Math.max(-1, Math.min(1, cosine))) * 180 / Math.PI
-}
 const avg = (values: number[]) => values.length ? values.reduce((total, value) => total + value, 0) / values.length : 0
 const clamp = (value: number, min = 0, max = 100) => Math.max(min, Math.min(max, value))
 
@@ -24,87 +14,83 @@ interface Sample {
 }
 
 export class SkillAnalyzer {
+  private readonly skill: Skill
+  private readonly settings: { targetReps: number; measureHold: boolean; targetHold: number; focus: string; positionTolerance: number; smoothingStrength: number }
   private samples: Sample[] = []
   private validReps = 0
   private partialReps = 0
-  private phase: 'ready' | 'lowered' | 'returning' | 'held' = 'ready'
+  private repConfidence: number[] = []
+  private phase: 'ready' | 'lowered' | 'returning' = 'ready'
   private repStarted = 0
+  private partialRepTimes: number[] = []
   private currentHold = 0
   private longestHold = 0
   private totalHold = 0
   private previousTime: number | undefined
   private countedLeftWrist: number | undefined
   private countedRightWrist: number | undefined
-  private lastSample: Sample | undefined
+  private smoothedAlignment: number | undefined
 
   constructor(
-    private readonly skill: Skill,
-    private readonly settings: { targetReps: number; measureHold: boolean; targetHold: number; focus: string },
-  ) {}
+    skill: Skill,
+    settings: { targetReps: number; measureHold: boolean; targetHold: number; focus: string; positionTolerance: number; smoothingStrength: number },
+  ) {
+    this.skill = skill
+    this.settings = settings
+  }
 
   consume(points: PosePoint[] | null, time: number): LiveMetrics {
-    if (!points || points.length <= P.rightAnkle) return this.live(0)
-    const visible = [P.leftShoulder, P.rightShoulder, P.leftHip, P.rightHip, P.leftKnee, P.rightKnee, P.leftAnkle, P.rightAnkle].map((index) => points[index].visibility)
-    const confidence = avg(visible)
+    if (!points || points.length <= landmark.rightAnkle) return this.live(0)
+    const frame = analyzeSkillFrame(this.skill, points)
+    const { confidence, alignment, symmetry, jointExtension, kneeAngle } = frame
     if (confidence < 0.3) {
       this.currentHold = 0
       this.previousTime = time
       return this.live(confidence)
     }
-    const pick = (left: number, right: number) => midpoint(points[left], points[right])
-    const shoulder = pick(P.leftShoulder, P.rightShoulder)
-    const hip = pick(P.leftHip, P.rightHip)
-    const knee = pick(P.leftKnee, P.rightKnee)
-    const ankle = pick(P.leftAnkle, P.rightAnkle)
-    const elbow = pick(P.leftElbow, P.rightElbow)
-    const wrist = pick(P.leftWrist, P.rightWrist)
-
-    const horizontalDeviation = Math.abs(Math.atan2(ankle.y - shoulder.y, ankle.x - shoulder.x) * 180 / Math.PI)
-    const frontLine = Math.min(horizontalDeviation, 180 - horizontalDeviation)
-    const verticalDeviation = Math.abs(Math.atan2(ankle.x - shoulder.x, ankle.y - shoulder.y) * 180 / Math.PI)
-    const alignment = this.skill.category === 'front-lever'
-      ? clamp(100 - Math.max(0, frontLine - 8) * 2.7)
-      : clamp(100 - Math.max(0, verticalDeviation - 8) * 2.4)
-    const symmetry = clamp(100 - Math.abs((points[P.leftHip].y - points[P.leftShoulder].y) - (points[P.rightHip].y - points[P.rightShoulder].y)) * 160)
-    const kneeAngle = (angle(points[P.leftHip], points[P.leftKnee], points[P.leftAnkle]) + angle(points[P.rightHip], points[P.rightKnee], points[P.rightAnkle])) / 2
-    const elbowAngle = (angle(points[P.leftShoulder], points[P.leftElbow], points[P.leftWrist]) + angle(points[P.rightShoulder], points[P.rightElbow], points[P.rightWrist])) / 2
-    const extendedJoint = this.skill.id === 'handstand-push-up-1' || this.skill.category === 'handstand-push-up'
-      ? elbowAngle
-      : kneeAngle
-    const sample: Sample = { time, confidence, alignment, symmetry, jointExtension: clamp(100 - Math.max(0, 165 - extendedJoint) * 2) }
+    this.smoothedAlignment = this.smoothedAlignment === undefined
+      ? alignment
+      : this.smoothedAlignment * (this.settings.smoothingStrength / 100) + alignment * (1 - this.settings.smoothingStrength / 100)
+    const sample: Sample = { time, confidence, alignment, symmetry, jointExtension }
     this.samples.push(sample)
-    this.lastSample = sample
 
     const dt = this.previousTime === undefined ? 0 : Math.max(0, Math.min(0.5, time - this.previousTime))
     this.previousTime = time
     const isStatic = this.skill.type === 'static' || this.skill.type === 'combined'
-    const isValidPosition = confidence >= 0.45 && alignment >= 60 && (this.skill.category !== 'front-lever' || kneeAngle >= (this.skill.id.includes('tuck') ? 40 : 125))
+    const scale = this.skill.category === 'front-lever' ? 2.7 : 2.4
+    const minAlignment = 100 - Math.max(0, this.settings.positionTolerance - 8) * scale
+    const isValidPosition = confidence >= 0.45 && (this.smoothedAlignment ?? alignment) >= minAlignment &&
+      (this.skill.category !== 'front-lever' || kneeAngle >= (this.skill.id.includes('tuck') ? 40 : 125))
     if (this.settings.measureHold && isStatic) {
       if (isValidPosition) {
         this.currentHold += dt
         this.totalHold += dt
         this.longestHold = Math.max(this.longestHold, this.currentHold)
       } else {
-        if (this.currentHold > 0.4 && this.currentHold < 1.5) this.partialReps += 1
+        if (this.currentHold > 0.4 && this.currentHold < 1.5) {
+          this.partialReps += 1
+          this.partialRepTimes.push(time)
+        }
         this.currentHold = 0
       }
     }
-    if (this.skill.type === 'dynamic') this.updateRepetition(elbowAngle, frontLine, time, points)
+    if (this.skill.type === 'dynamic' && confidence >= 0.45) this.updateRepetition(frame, time, points)
     return this.live(confidence)
   }
 
-  private updateRepetition(elbowAngle: number, frontLine: number, time: number, points: PosePoint[]) {
-    const id = this.skill.id
+  private updateRepetition(frame: ReturnType<typeof analyzeSkillFrame>, time: number, points: PosePoint[]) {
+    const { elbowAngle, frontLine, verticalDeviation, hipAngle } = frame
     const isPress = this.skill.category === 'bent-arm-press'
+    const isKickUp = this.skill.name === 'Handstand Kick-Up'
     const isFrontRaise = this.skill.name === 'Front Lever Raises'
     const isPullUp = this.skill.name.includes('Pull-Ups')
     const isHandstandWalk = this.skill.name === 'Handstand Walking'
     const elbowDriven = this.skill.category === 'handstand-push-up' || isPullUp
-    const bottom = isPress ? frontLine > 55 : isFrontRaise ? frontLine > 55 : elbowDriven ? elbowAngle < 100 : elbowAngle < 100
-    const top = isPress ? frontLine < 25 : isFrontRaise ? frontLine < 25 : elbowDriven ? elbowAngle > 145 : elbowAngle > 145
+    const bottom = isPress ? hipAngle < 115 : isKickUp ? verticalDeviation > 30 : isFrontRaise ? frontLine > 55 : elbowDriven ? elbowAngle < 100 : elbowAngle < 100
+    const top = isPress ? hipAngle > 150 : isKickUp ? verticalDeviation < 20 : isFrontRaise ? frontLine < 25 : elbowDriven ? elbowAngle > 145 : elbowAngle > 145
     if (isHandstandWalk) {
-      const left = points[P.leftWrist]
-      const right = points[P.rightWrist]
+      const left = points[landmark.leftWrist]
+      const right = points[landmark.rightWrist]
       const moved = (this.countedLeftWrist !== undefined && Math.abs(left.x - this.countedLeftWrist) > 0.06) ||
         (this.countedRightWrist !== undefined && Math.abs(right.x - this.countedRightWrist) > 0.06)
       if (this.countedLeftWrist === undefined || this.countedRightWrist === undefined) {
@@ -112,23 +98,41 @@ export class SkillAnalyzer {
         this.countedRightWrist = right.x
       } else if (moved) {
         this.validReps += 1
+        this.repConfidence.push(frame.confidence)
         this.countedLeftWrist = left.x
         this.countedRightWrist = right.x
       }
       return
     }
-    if (this.phase === 'ready' && (isPress ? bottom : top)) {
+    if (this.phase === 'ready' && (isPress || isKickUp ? bottom : top)) {
       this.phase = 'lowered'
       this.repStarted = time
-    } else if (this.phase === 'lowered' && (isPress ? top : bottom) && time - this.repStarted > 0.25) {
-      this.phase = 'returning'
-    } else if (this.phase === 'returning' && (isPress ? bottom : top)) {
-      if (time - this.repStarted > 0.5) this.validReps += 1
-      else this.partialReps += 1
+    } else if (this.phase === 'lowered' && (isPress || isKickUp ? top : bottom) && time - this.repStarted > 0.25) {
+      if (isPress || isKickUp) {
+        if (time - this.repStarted > 0.5) {
+          this.validReps += 1
+          this.repConfidence.push(frame.confidence)
+        }
+        else {
+          this.partialReps += 1
+          this.partialRepTimes.push(time)
+        }
+        this.phase = 'ready'
+      } else this.phase = 'returning'
+    } else if (this.phase === 'returning' && top) {
+      if (time - this.repStarted > 0.5) {
+        this.validReps += 1
+        this.repConfidence.push(frame.confidence)
+      }
+      else {
+        this.partialReps += 1
+        this.partialRepTimes.push(time)
+      }
       this.phase = 'ready'
     }
     if (this.phase !== 'ready' && time - this.repStarted > 12) {
       this.partialReps += 1
+      this.partialRepTimes.push(time)
       this.phase = 'ready'
     }
   }
@@ -145,28 +149,37 @@ export class SkillAnalyzer {
   }
 
   report(): AnalysisReport {
+    const partialReps = this.partialReps + (this.skill.type === 'dynamic' && this.phase !== 'ready' ? 1 : 0)
     const confidence = avg(this.samples.map((sample) => sample.confidence))
     const alignment = avg(this.samples.map((sample) => sample.alignment))
     const symmetry = avg(this.samples.map((sample) => sample.symmetry))
     const joint = avg(this.samples.map((sample) => sample.jointExtension))
     const enoughEvidence = this.samples.length >= 12 && confidence >= 0.45
+    const alignmentVariance = avg(this.samples.map((sample) => (sample.alignment - alignment) ** 2))
+    const stability = clamp(100 - Math.sqrt(alignmentVariance) * 2)
     const movement = this.skill.type === 'dynamic'
-      ? clamp((this.validReps / this.settings.targetReps) * 100 - this.partialReps * 12)
+      ? clamp((this.validReps / this.settings.targetReps) * 100 - partialReps * 12)
       : this.settings.measureHold
-        ? clamp((this.longestHold / this.settings.targetHold) * 100)
-        : clamp(alignment)
+        ? (clamp((this.longestHold / this.settings.targetHold) * 100) + stability) / 2
+        : stability
     const criteria = [
       { name: 'Body alignment', score: Math.round(alignment), detail: 'Estimated from 2D shoulder, hip and ankle landmarks.' },
       { name: 'Joint position', score: Math.round(joint), detail: 'Estimated joint extension; camera perspective affects angles.' },
       { name: 'Control & stability', score: Math.round(symmetry), detail: 'A rough proxy from visible left-right landmark consistency.' },
-      { name: this.skill.type === 'dynamic' ? 'Movement completion' : 'Position consistency', score: Math.round(movement), detail: this.skill.type === 'dynamic' ? 'Based on detected movement phases.' : 'Based on valid-position duration and pose visibility.' },
+      { name: this.skill.type === 'dynamic' ? 'Movement completion' : 'Hold consistency', score: Math.round(movement), detail: this.skill.type === 'dynamic' ? 'Based on detected movement phases and the configured rep target.' : 'Combines frame-to-frame alignment stability and target-hold attainment.' },
     ]
-    const score = enoughEvidence ? Math.round(avg(criteria.map((criterion) => criterion.score))) : null
+    const weights = this.skill.category === 'front-lever' ? [0.45, 0.15, 0.2, 0.2]
+      : this.skill.category === 'handstand' ? [0.4, 0.15, 0.3, 0.15]
+        : this.skill.category === 'handstand-push-up' ? [0.15, 0.35, 0.2, 0.3]
+          : [0.25, 0.2, 0.2, 0.35]
+    const score = enoughEvidence
+      ? Math.round(criteria.reduce((total, criterion, index) => total + criterion.score * weights[index], 0))
+      : null
     const issues: string[] = []
     if (enoughEvidence && alignment < 65) issues.push(this.skill.category === 'front-lever' ? 'Hips appear to drop below the shoulder-to-ankle line.' : 'Body line drifts from vertical during the analyzed frames.')
     if (enoughEvidence && joint < 65) issues.push('Visible knee or elbow extension appears inconsistent.')
     if (enoughEvidence && symmetry < 65) issues.push('Left and right side landmarks appear uneven; check camera angle and symmetry.')
-    if (this.partialReps > 0) issues.push(`${this.partialReps} movement phase${this.partialReps === 1 ? '' : 's'} did not meet the completion criteria.`)
+    if (partialReps > 0) issues.push(`${partialReps} movement phase${partialReps === 1 ? '' : 's'} did not meet the completion criteria.`)
     const positives = enoughEvidence
       ? [alignment >= 75 ? 'Good body-line alignment in the visible frames.' : 'A clear baseline is available for tracking body-line changes.', confidence >= 0.7 ? 'Landmark visibility was strong for most analyzed frames.' : 'Some pose landmarks were visible throughout the attempt.']
       : ['No reliable technique judgment was produced; improve framing and lighting before comparing results.']
@@ -175,20 +188,32 @@ export class SkillAnalyzer {
       joint < 75 ? 'Prioritize a controlled range and pause briefly at the positions you want to own.' : 'Use a slower tempo to make technique changes easier to verify.',
       confidence < 0.65 ? 'Improve lighting and avoid covering joints with clothing or equipment.' :       `Focus on: ${(this.settings.focus || this.skill.checkpoints[0]).toLowerCase()}.`,
     ]
+    const timestampExamples = issues.flatMap((issue) => {
+      const sample = issue.toLowerCase().includes('body line') || issue.includes('Hips appear')
+        ? this.samples.find((item) => item.alignment < 65)
+        : issue.includes('knee or elbow')
+          ? this.samples.find((item) => item.jointExtension < 65)
+          : issue.includes('side landmarks')
+            ? this.samples.find((item) => item.symmetry < 65)
+            : undefined
+      const time = sample?.time ?? (issue.includes('movement phase') ? this.partialRepTimes[0] ?? this.samples[this.samples.length - 1]?.time : undefined)
+      return time === undefined ? [] : [{ time, issue }]
+    })
     return {
       score,
       confidence: Math.round(confidence * 100),
       insufficientConfidence: !enoughEvidence,
       framesAnalyzed: this.samples.length,
       validReps: this.validReps,
-      partialReps: this.partialReps,
+      partialReps,
       longestHold: this.longestHold,
       totalHold: this.totalHold,
+      repConfidence: this.repConfidence,
       criteria,
       issues,
       positives,
       suggestions,
-      timestampExamples: issues.slice(0, 3).map((issue) => ({ time: this.lastSample?.time ?? 0, issue })),
+      timestampExamples,
     }
   }
 }

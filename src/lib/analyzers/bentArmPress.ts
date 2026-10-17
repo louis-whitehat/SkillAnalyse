@@ -1,0 +1,19 @@
+import type { PosePoint } from '../../types'
+import { bodyLine, bodyAlignment, clamp, frameConfidence, jointAngles } from './common'
+import type { SkillFrame } from './types'
+
+export function analyzeBentArmPress(points: PosePoint[]): SkillFrame {
+  const body = bodyLine(points)
+  const joints = jointAngles(points)
+  return {
+    confidence: frameConfidence(points),
+    alignment: bodyAlignment(body.verticalDeviation, body.hipOffset, 2.4),
+    symmetry: body.symmetry,
+    jointExtension: clamp(100 - Math.max(0, 165 - joints.knee) * 2),
+    kneeAngle: joints.knee,
+    hipAngle: joints.hip,
+    elbowAngle: joints.elbow,
+    frontLine: body.frontLine,
+    verticalDeviation: body.verticalDeviation,
+  }
+}

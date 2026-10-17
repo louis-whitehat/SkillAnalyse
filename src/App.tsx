@@ -19,7 +19,7 @@ type MediaMode = 'camera' | 'upload'
 const initialMetrics: LiveMetrics = { confidence: 0, validReps: 0, partialReps: 0, currentHold: 0, longestHold: 0, totalHold: 0 }
 const emptyReport = (): AnalysisReport => ({
   score: null, confidence: 0, insufficientConfidence: true, framesAnalyzed: 0, validReps: 0, partialReps: 0,
-  longestHold: 0, totalHold: 0, criteria: [], issues: [], positives: [], suggestions: [], timestampExamples: [],
+  longestHold: 0, totalHold: 0, repConfidence: [], criteria: [], issues: [], positives: [], suggestions: [], timestampExamples: [],
 })
 const navItems = [
   { id: 'home' as const, label: 'Overview', icon: Activity },
@@ -36,6 +36,8 @@ function App() {
   const [targetReps, setTargetReps] = useState(5)
   const [targetHold, setTargetHold] = useState(20)
   const [measureHold, setMeasureHold] = useState(true)
+  const [positionTolerance, setPositionTolerance] = useState(25)
+  const [smoothingStrength, setSmoothingStrength] = useState(65)
   const [focus, setFocus] = useState('')
   const [sessions, setSessions] = useState<TrainingSession[]>([])
   const [activeSession, setActiveSession] = useState<TrainingSession | null>(null)
@@ -50,11 +52,14 @@ function App() {
   const [elapsed, setElapsed] = useState(0)
   const [metrics, setMetrics] = useState<LiveMetrics>(initialMetrics)
   const [landmarks, setLandmarks] = useState<PosePoint[] | null>(null)
+  const [poseVideoSize, setPoseVideoSize] = useState({ width: 0, height: 0 })
   const [mediaMode, setMediaMode] = useState<MediaMode>('camera')
   const [uploadedVideo, setUploadedVideo] = useState<Blob | null>(null)
-  const [uploadedUrl, setUploadedUrl] = useState('')
   const [analysisRunning, setAnalysisRunning] = useState(false)
   const [historySkill, setHistorySkill] = useState('all')
+  const [historyCategory, setHistoryCategory] = useState('all')
+  const [historyPeriod, setHistoryPeriod] = useState('all')
+  const [historyAnchor] = useState(() => Date.now())
 
   const cameraRef = useRef<HTMLVideoElement>(null)
   const uploadRef = useRef<HTMLVideoElement>(null)
@@ -76,7 +81,7 @@ function App() {
       setError('Training history could not be read from this browser.')
     })
     return () => {
-      stopInference()
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current)
       streamRef.current?.getTracks().forEach((track) => track.stop())
       if (countdownTimerRef.current !== null) window.clearInterval(countdownTimerRef.current)
     }
@@ -92,15 +97,8 @@ function App() {
     return () => window.clearInterval(timer)
   }, [recording, paused])
 
-  useEffect(() => {
-    if (!uploadedVideo) {
-      setUploadedUrl('')
-      return
-    }
-    const url = URL.createObjectURL(uploadedVideo)
-    setUploadedUrl(url)
-    return () => URL.revokeObjectURL(url)
-  }, [uploadedVideo])
+  const uploadedUrl = useMemo(() => uploadedVideo ? URL.createObjectURL(uploadedVideo) : '', [uploadedVideo])
+  useEffect(() => () => { if (uploadedUrl) URL.revokeObjectURL(uploadedUrl) }, [uploadedUrl])
 
   const filteredSkills = useMemo(() => skills.filter((skill) =>
     (category === 'all' || skill.category === category) &&
@@ -109,8 +107,20 @@ function App() {
 
   const recentSessions = sessions.slice(0, 4)
   const bestScore = sessions.reduce((best, session) => Math.max(best, session.report.score ?? 0), 0)
-  const totalMinutes = Math.round(sessions.reduce((total, session) => total + session.report.totalHold, 0) / 60)
-  const filteredHistory = sessions.filter((session) => historySkill === 'all' || session.skillId === historySkill)
+  const bestHold = sessions.reduce((best, session) => Math.max(best, session.report.longestHold), 0)
+  const filteredHistory = sessions.filter((session) => {
+    const days = historyPeriod === 'all' ? 0 : Number(historyPeriod)
+    const inPeriod = days === 0 || historyAnchor - new Date(session.date).getTime() <= days * 24 * 60 * 60 * 1000
+    return (historySkill === 'all' || session.skillId === historySkill) &&
+      (historyCategory === 'all' || session.category === historyCategory) && inPeriod
+  })
+
+  const chooseSkill = (skill: Skill) => {
+    setSelectedSkill(skill)
+    setMeasureHold(skill.type !== 'dynamic')
+    setScreen('session')
+    setError('')
+  }
 
   const stopInference = useCallback(() => {
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current)
@@ -125,6 +135,16 @@ function App() {
     setCameraActive(false)
     if (cameraRef.current) cameraRef.current.srcObject = null
   }, [])
+
+  const navigateTo = (destination: Screen) => {
+    if (recording || analysisRunning || countdown > 0 || loading) {
+      setError('Finish or stop the active analysis before leaving this screen.')
+      return
+    }
+    stopInference()
+    stopCamera()
+    setScreen(destination)
+  }
 
   const startCamera = async (facing: 'environment' | 'user' = cameraFacing) => {
     setError('')
@@ -174,6 +194,7 @@ function App() {
 
   const inferenceLoop = (video: HTMLVideoElement, time: () => number) => {
     stopInference()
+    setPoseVideoSize({ width: video.videoWidth, height: video.videoHeight })
     setAnalysisRunning(true)
     const tick = () => {
       rafRef.current = requestAnimationFrame(tick)
@@ -202,7 +223,7 @@ function App() {
       skillName: selectedSkill?.name ?? 'Unknown skill',
       category: selectedSkill?.category ?? 'handstand',
       report,
-      settings: { targetReps, measureHold, targetHold, focus },
+      settings: { targetReps, measureHold, targetHold, focus, positionTolerance, smoothingStrength },
       ...(video ? { video } : {}),
     }
     setActiveSession(session)
@@ -232,7 +253,7 @@ function App() {
     setLoadingMessage('Preparing pose analysis…')
     try {
       await ensurePoseModel()
-      analyzerRef.current = new SkillAnalyzer(selectedSkill, { targetReps, measureHold, targetHold, focus })
+      analyzerRef.current = new SkillAnalyzer(selectedSkill, { targetReps, measureHold, targetHold, focus, positionTolerance, smoothingStrength })
       setMetrics(initialMetrics)
       setElapsed(0)
       setLandmarks(null)
@@ -324,6 +345,7 @@ function App() {
     setMediaMode('upload')
     setUploadedVideo(file)
     setLandmarks(null)
+    setPoseVideoSize({ width: 0, height: 0 })
     setMetrics(initialMetrics)
     analyzerRef.current = null
   }
@@ -336,7 +358,7 @@ function App() {
     setLoadingMessage('Preparing local pose analysis…')
     try {
       await ensurePoseModel()
-      analyzerRef.current = new SkillAnalyzer(selectedSkill, { targetReps, measureHold, targetHold, focus })
+      analyzerRef.current = new SkillAnalyzer(selectedSkill, { targetReps, measureHold, targetHold, focus, positionTolerance, smoothingStrength })
       setMetrics(initialMetrics)
       setLandmarks(null)
       await video.play()
@@ -396,20 +418,23 @@ function App() {
     setScreen('report')
   }
 
-  const videoUrl = useMemo(() => activeSession?.video ? URL.createObjectURL(activeSession.video) : '', [activeSession?.id])
+  const sessionVideo = activeSession?.video
+  const videoUrl = useMemo(() => sessionVideo ? URL.createObjectURL(sessionVideo) : '', [sessionVideo])
   useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl) }, [videoUrl])
+  const poseVideoWidth = poseVideoSize.width || 1
+  const poseVideoHeight = poseVideoSize.height || 1
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <button className="brand" onClick={() => setScreen('home')} aria-label="Calisthenics AI home">
+        <button className="brand" onClick={() => navigateTo('home')} aria-label="Calisthenics AI home">
           <span className="brand-mark"><Activity size={20} strokeWidth={2.5} /></span>
           <span>CALISTHENICS<span className="brand-light">AI</span></span>
         </button>
         <div className="sidebar-label">WORKSPACE</div>
         <nav className="side-nav" aria-label="Main navigation">
           {navItems.map(({ id, label, icon: Icon }) => (
-            <button key={id} className={`nav-item ${screen === id ? 'active' : ''}`} onClick={() => setScreen(id)}>
+            <button key={id} className={`nav-item ${screen === id ? 'active' : ''}`} onClick={() => navigateTo(id)}>
               <Icon size={18} /><span>{label}</span>
               {id === 'history' && sessions.length > 0 && <span className="nav-count">{sessions.length}</span>}
             </button>
@@ -427,7 +452,7 @@ function App() {
       <main className="main-area">
         <header className="topbar">
           <div className="breadcrumb"><span>TRAINING</span><span className="crumb-slash">/</span><strong>{screen === 'home' ? 'Overview' : screen === 'select' ? 'Skill library' : screen === 'session' ? 'New analysis' : screen === 'report' ? 'Session report' : 'Training log'}</strong></div>
-          <button className="topbar-cta" onClick={() => { setScreen('select'); setError('') }}><Plus size={16} /> New analysis</button>
+          <button className="topbar-cta" onClick={() => { setError(''); navigateTo('select') }}><Plus size={16} /> New analysis</button>
         </header>
 
         {error && <div className="global-alert" role="alert"><CircleAlert size={17} /><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError('')}><X size={16} /></button></div>}
@@ -441,7 +466,7 @@ function App() {
             <div className="stat-grid">
               <StatCard label="Sessions logged" value={String(sessions.length).padStart(2, '0')} note="On this device" icon={<Dumbbell size={18} />} />
               <StatCard label="Best technique score" value={bestScore ? `${bestScore}` : '—'} suffix={bestScore ? '/ 100' : ''} note={bestScore ? 'Across analyzed sessions' : 'Complete your first analysis'} icon={<Sparkles size={18} />} />
-              <StatCard label="Valid hold time" value={totalMinutes ? `${totalMinutes}` : '—'} suffix={totalMinutes ? 'min' : ''} note="Technique-qualified time" icon={<Clock3 size={18} />} />
+              <StatCard label="Longest valid hold" value={bestHold ? formatTime(bestHold) : '—'} note="Personal best · technique-qualified" icon={<Clock3 size={18} />} />
             </div>
             <div className="home-grid">
               <section className="panel progress-panel">
@@ -449,6 +474,7 @@ function App() {
                 {recentSessions.length ? <div className="session-list">
                   {recentSessions.map((session) => <SessionRow key={session.id} session={session} onClick={() => openSession(session)} />)}
                 </div> : <EmptyState title="Your training starts here" text="Run your first skill analysis to build a personal progress timeline." action="Choose a skill" onClick={() => setScreen('select')} />}
+                {sessions.some((session) => session.report.score !== null) && <ScoreTrend sessions={sessions} />}
               </section>
               <section className="panel spotlight-panel">
                 <div className="eyebrow">BUILT FOR YOUR NEXT REP</div><h2>One camera.<br /><em>Better awareness.</em></h2>
@@ -459,7 +485,7 @@ function App() {
               </section>
             </div>
             <div className="section-heading"><div><div className="eyebrow">PICK UP WHERE YOU LEFT OFF</div><h2>Explore progressions</h2></div><button className="text-button" onClick={() => setScreen('select')}>All skills <ArrowRight size={15} /></button></div>
-            <div className="quick-skills">{skills.slice(0, 4).map((skill, index) => <button className="quick-skill" key={skill.id} onClick={() => { setSelectedSkill(skill); setScreen('session') }}><span className={`skill-number n-${index + 1}`}>0{index + 1}</span><span><strong>{skill.name}</strong><small>{skill.categoryName} · Level {skill.level}</small></span><ArrowRight size={16} /></button>)}</div>
+            <div className="quick-skills">{skills.slice(0, 4).map((skill, index) => <button className="quick-skill" key={skill.id} onClick={() => chooseSkill(skill)}><span className={`skill-number n-${index + 1}`}>0{index + 1}</span><span><strong>{skill.name}</strong><small>{skill.categoryName} · Level {skill.level}</small></span><ArrowRight size={16} /></button>)}</div>
           </section>
         )}
 
@@ -473,7 +499,7 @@ function App() {
               const group = filteredSkills.filter((skill) => skill.category === item.id)
               if (!group.length) return null
               return <div className="skill-group" key={item.id}><div className="group-title"><span className="category-indicator" />{item.label}<span className="group-count">{String(group.length).padStart(2, '0')}</span></div><div className="skill-grid">
-                {group.map((skill) => <SkillCard key={skill.id} skill={skill} onChoose={() => { setSelectedSkill(skill); setScreen('session'); setError('') }} />)}
+                {group.map((skill) => <SkillCard key={skill.id} skill={skill} onChoose={() => chooseSkill(skill)} />)}
               </div></div>
             })}
             {filteredSkills.length === 0 && <EmptyState title="No matching skills" text="Try a different search term or category." action="Clear filters" onClick={() => { setQuery(''); setCategory('all') }} />}
@@ -482,16 +508,16 @@ function App() {
 
         {screen === 'session' && selectedSkill && (
           <section className="page-content session-page">
-            <div className="page-heading compact-heading"><div><button className="back-link" onClick={() => setScreen('select')}>← Skill library</button><div className="eyebrow">{selectedSkill.categoryName.toUpperCase()} · LEVEL {selectedSkill.level}</div><h1>{selectedSkill.name}</h1><p className="lede">{selectedSkill.description}</p></div></div>
+            <div className="page-heading compact-heading">            <div><button className="back-link" onClick={() => navigateTo('select')}>← Skill library</button><div className="eyebrow">{selectedSkill.categoryName.toUpperCase()} · LEVEL {selectedSkill.level}</div><h1>{selectedSkill.name}</h1><p className="lede">{selectedSkill.description}</p></div></div>
             <div className="session-layout">
               <div className="session-left">
                 <div className="camera-stage">
                   {mediaMode === 'camera' ? <video ref={cameraRef} className="preview-video" autoPlay muted playsInline /> : <video ref={uploadRef} className="preview-video" src={uploadedUrl} controls playsInline onEnded={finishUploadedAnalysis} />}
                   <div className="camera-vignette" />
-                  {mediaMode === 'camera' && landmarks && <svg className="skeleton-overlay" viewBox="0 0 1 1" preserveAspectRatio="none" aria-label="Detected pose overlay">{skeletonLinks.map(([a, b]) => {
+                  {landmarks && (cameraActive || analysisRunning) && <svg className="skeleton-overlay" viewBox={`0 0 ${poseVideoWidth} ${poseVideoHeight}`} preserveAspectRatio="xMidYMid meet" aria-label="Detected pose overlay">{skeletonLinks.map(([a, b]) => {
                     const pointA = landmarks[a]; const pointB = landmarks[b]
-                    return pointA && pointB && pointA.visibility > 0.35 && pointB.visibility > 0.35 ? <line key={`${a}-${b}`} x1={pointA.x} y1={pointA.y} x2={pointB.x} y2={pointB.y} /> : null
-                  })}{landmarks.map((point, index) => point.visibility > 0.45 ? <circle key={index} cx={point.x} cy={point.y} r=".009" /> : null)}</svg>}
+                    return pointA && pointB && pointA.visibility > 0.35 && pointB.visibility > 0.35 ? <line key={`${a}-${b}`} x1={pointA.x * poseVideoWidth} y1={pointA.y * poseVideoHeight} x2={pointB.x * poseVideoWidth} y2={pointB.y * poseVideoHeight} /> : null
+                  })}{landmarks.map((point, index) => point.visibility > 0.45 ? <circle key={index} cx={point.x * poseVideoWidth} cy={point.y * poseVideoHeight} r={poseVideoWidth * .009} /> : null)}</svg>}
                   {!cameraActive && mediaMode === 'camera' && <div className="camera-placeholder"><div className="camera-placeholder-icon"><Video size={26} /></div><strong>Set up your camera</strong><span>Position your phone so your full body stays in frame.</span><button className="button-primary" onClick={() => void startCamera()} disabled={loading}><Video size={16} /> Enable camera</button></div>}
                   {mediaMode === 'upload' && !uploadedUrl && <div className="camera-placeholder"><div className="camera-placeholder-icon"><Upload size={26} /></div><strong>Choose a video</strong><span>MP4 and WebM are supported where your browser can decode them.</span><button className="button-primary" onClick={() => fileInputRef.current?.click()}><Upload size={16} /> Browse files</button></div>}
                   {cameraActive && <div className="camera-topline"><span><i className={recording ? 'recording-dot' : 'ready-dot'} />{recording ? paused ? 'PAUSED' : 'RECORDING' : analysisRunning ? 'ANALYZING' : 'CAMERA READY'}</span><span>FULL BODY · SIDE VIEW</span></div>}
@@ -512,16 +538,17 @@ function App() {
                     <button className="button-primary" onClick={() => analysisRunning ? finishUploadedAnalysis() : void analyzeUploadedVideo()} disabled={loading || !uploadedUrl}>{loading ? <><span className="spinner" />{loadingMessage}</> : analysisRunning ? <><Square size={14} fill="currentColor" /> Finish analysis</> : <><Activity size={16} /> Analyze video</>}</button>
                     <button className="upload-inline" onClick={() => fileInputRef.current?.click()}><Upload size={16} /> Replace</button>
                   </>}
-                  <input ref={fileInputRef} type="file" accept="video/*" hidden onChange={(event) => selectVideo(event.target.files?.[0])} />
+                  <input ref={fileInputRef} type="file" accept="video/*" hidden onChange={(event) => { selectVideo(event.target.files?.[0]); event.target.value = '' }} />
                 </div>
                 {analysisRunning && <div className="live-readout"><div><span>POSE CONFIDENCE</span><strong>{Math.round(metrics.confidence * 100)}%</strong></div><div><span>{selectedSkill.type === 'dynamic' ? 'COMPLETED REPS' : 'LONGEST HOLD'}</span><strong>{selectedSkill.type === 'dynamic' ? metrics.validReps : formatTime(metrics.longestHold)}</strong></div><div><span>VALID HOLD TIME</span><strong>{formatTime(metrics.totalHold)}</strong></div></div>}
                 <div className="camera-note"><ShieldCheck size={16} /><span>Video analysis runs locally on this device. No video is uploaded.</span></div>
               </div>
               <aside className="session-right">
                 <section className="panel setup-panel"><div className="panel-heading"><div><div className="eyebrow">SESSION SETUP</div><h2>Make it yours</h2></div></div>
-                  <div className="form-row"><label htmlFor="target-reps">Rep target</label><div className="number-control"><button onClick={() => setTargetReps(Math.max(1, targetReps - 1))} aria-label="Decrease rep target">−</button><input id="target-reps" type="number" min="1" max="50" value={targetReps} onChange={(event) => setTargetReps(Math.max(1, Number(event.target.value) || 1))} /><button onClick={() => setTargetReps(Math.min(50, targetReps + 1))} aria-label="Increase rep target">+</button></div></div>
-                  <label className="toggle-row"><span><strong>Measure valid holds</strong><small>Track only time in a qualified position</small></span><input type="checkbox" checked={measureHold} onChange={(event) => setMeasureHold(event.target.checked)} /><i /></label>
-                  {measureHold && <div className="form-row"><label htmlFor="target-hold">Target hold</label><div className="number-control"><button onClick={() => setTargetHold(Math.max(5, targetHold - 5))}>−</button><input id="target-hold" type="number" min="5" max="300" step="5" value={targetHold} onChange={(event) => setTargetHold(Math.max(5, Number(event.target.value) || 5))} /><button onClick={() => setTargetHold(Math.min(300, targetHold + 5))}>+</button></div></div>}
+                  {selectedSkill.type === 'dynamic' && <div className="form-row"><label htmlFor="target-reps">Rep target</label><div className="number-control"><button onClick={() => setTargetReps(Math.max(1, targetReps - 1))} aria-label="Decrease rep target">−</button><input id="target-reps" type="number" min="1" max="50" value={targetReps} onChange={(event) => setTargetReps(Math.min(50, Math.max(1, Number(event.target.value) || 1)))} /><button onClick={() => setTargetReps(Math.min(50, targetReps + 1))} aria-label="Increase rep target">+</button></div></div>}
+                  {selectedSkill.type !== 'dynamic' && <><label className="toggle-row"><span><strong>Measure valid holds</strong><small>Track only time in a qualified position</small></span><input type="checkbox" checked={measureHold} onChange={(event) => setMeasureHold(event.target.checked)} /><i /></label>
+                    {measureHold && <div className="form-row"><label htmlFor="target-hold">Target hold</label><div className="number-control"><button onClick={() => setTargetHold(Math.max(5, targetHold - 5))}>−</button><input id="target-hold" type="number" min="5" max="300" step="5" value={targetHold} onChange={(event) => setTargetHold(Math.min(300, Math.max(5, Number(event.target.value) || 5)))} /><button onClick={() => setTargetHold(Math.min(300, targetHold + 5))}>+</button></div></div>}</>}
+                  {selectedSkill.type !== 'dynamic' && <div className="sensitivity-control"><label htmlFor="position-tolerance">Hold position tolerance <b>±{positionTolerance}°</b></label><input id="position-tolerance" type="range" min="12" max="35" value={positionTolerance} onChange={(event) => setPositionTolerance(Number(event.target.value))} /><small>Higher tolerance accepts more position drift.</small><label htmlFor="smoothing-strength">Pose smoothing <b>{smoothingStrength}%</b></label><input id="smoothing-strength" type="range" min="45" max="85" value={smoothingStrength} onChange={(event) => setSmoothingStrength(Number(event.target.value))} /><small>Higher smoothing filters brief landmark noise.</small></div>}
                   <div className="form-field"><label htmlFor="focus">Technique focus <span>OPTIONAL</span></label><input id="focus" value={focus} onChange={(event) => setFocus(event.target.value)} placeholder="e.g. keep hips level" maxLength={70} /></div>
                   <div className="setup-divider" /><div className="checklist-heading"><span className="mini-check"><Check size={12} /></span><strong>Technique checkpoints</strong></div>
                   <ul className="checkpoint-list">{selectedSkill.checkpoints.map((checkpoint) => <li key={checkpoint}><span />{checkpoint}</li>)}</ul>
@@ -535,7 +562,7 @@ function App() {
 
         {screen === 'report' && activeSession && (
           <section className="page-content report-page">
-            <div className="report-top"><div><button className="back-link" onClick={showHistory}>← Training log</button><div className="eyebrow">SESSION COMPLETE · {new Date(activeSession.date).toLocaleDateString(undefined, { dateStyle: 'medium' })}</div><h1>{activeSession.skillName}</h1><p className="lede">Your analysis is ready. Treat 2D estimates as training feedback, not a precise biomechanical measurement.</p></div><button className="button-primary" onClick={resetWorkflow}><RotateCcw size={16} /> Analyze again</button></div>
+            <div className="report-top"><div><button className="back-link" onClick={showHistory}>← Training log</button><div className="eyebrow">SESSION COMPLETE · {new Date(activeSession.date).toLocaleDateString(undefined, { dateStyle: 'medium' })}</div><h1>{activeSession.skillName}</h1><p className="lede">Your analysis is ready. Treat 2D estimates as training feedback, not a precise biomechanical measurement.</p><p className="report-settings">{getSkill(activeSession.skillId)?.type === 'dynamic' ? `${activeSession.settings.targetReps} rep target · ` : ''}{activeSession.settings.measureHold ? `${activeSession.settings.targetHold}s hold target · ±${activeSession.settings.positionTolerance}° tolerance` : 'hold timer off'} · {activeSession.settings.smoothingStrength}% smoothing{activeSession.settings.focus ? ` · Focus: ${activeSession.settings.focus}` : ''}</p></div><button className="button-primary" onClick={resetWorkflow}><RotateCcw size={16} /> Analyze again</button></div>
             {activeSession.report.insufficientConfidence && <div className="confidence-alert"><CircleAlert size={18} /><div><strong>Not enough reliable pose evidence for a score</strong><span>Try brighter lighting, a steady side-on camera and a fully visible body. No score was invented.</span></div></div>}
             <div className="report-summary">
               <div className="score-card panel"><div className="eyebrow">TECHNIQUE SCORE</div><div className={`score-number ${activeSession.report.score === null ? 'no-score' : ''}`}>{activeSession.report.score ?? '—'}<small>{activeSession.report.score !== null && '/100'}</small></div><div className="score-caption">{activeSession.report.score === null ? 'Insufficient confidence' : 'Estimated from visible pose frames'}</div><div className="score-bar"><i style={{ width: `${activeSession.report.score ?? 0}%` }} /></div><div className="score-foot"><span>POSE CONFIDENCE</span><strong>{activeSession.report.confidence}%</strong></div></div>
@@ -549,10 +576,11 @@ function App() {
             <div className="report-details">
               <div className="panel criteria-panel"><div className="panel-heading"><div><div className="eyebrow">SKILL-SPECIFIC BREAKDOWN</div><h2>Technique signals</h2></div></div>
                 {activeSession.report.criteria.length ? <div className="criteria-list">{activeSession.report.criteria.map((criterion) => <div className="criterion" key={criterion.name}><div className="criterion-top"><div><strong>{criterion.name}</strong><small>{criterion.detail}</small></div><b>{activeSession.report.score === null ? '—' : criterion.score}</b></div><div className="criterion-bar"><i style={{ width: `${activeSession.report.score === null ? 0 : criterion.score}%` }} /></div></div>)}</div> : <p className="muted-text">No pose frames were recorded for this session.</p>}
+                {activeSession.report.repConfidence.length > 0 && <div className="rep-confidence"><strong>REP LANDMARK CONFIDENCE</strong><div>{activeSession.report.repConfidence.map((confidence, index) => <span key={`${index}-${confidence}`}>#{index + 1} <b>{Math.round(confidence * 100)}%</b></span>)}</div><small>Visibility confidence at each completed rep; not a form-quality score.</small></div>}
               </div>
               <div className="panel notes-panel"><div className="eyebrow">COACHING NOTES</div><h2>What we noticed</h2>
                 <div className="note-section"><strong className="note-positive">GOOD SIGNALS</strong>{activeSession.report.positives.map((item) => <p key={item}><Check size={14} />{item}</p>)}</div>
-                {activeSession.report.issues.length > 0 && <div className="note-section"><strong className="note-warning">AREAS TO REVIEW</strong>{activeSession.report.issues.map((item) => <p key={item}><ArrowDownRight size={14} />{item}</p>)}</div>}
+                {activeSession.report.issues.length > 0 && <div className="note-section"><strong className="note-warning">AREAS TO REVIEW</strong>{activeSession.report.issues.map((item) => { const example = activeSession.report.timestampExamples.find((entry) => entry.issue === item); return <p key={item}><ArrowDownRight size={14} />{example && <time className="issue-timestamp">{formatTime(example.time)}</time>}{item}</p> })}</div>}
                 <div className="note-section"><strong className="note-suggestion">NEXT SESSION</strong>{activeSession.report.suggestions.map((item, index) => <p key={item}><span className="suggestion-index">0{index + 1}</span>{item}</p>)}</div>
               </div>
             </div>
@@ -562,10 +590,10 @@ function App() {
 
         {screen === 'history' && (
           <section className="page-content">
-            <div className="history-heading"><div><div className="eyebrow">YOUR LOCAL TRAINING LOG</div><h1>Keep showing up.</h1><p className="lede">Your sessions are stored on this device. They are never sent to a server.</p></div><div className="history-tools"><select aria-label="Filter by skill" value={historySkill} onChange={(event) => setHistorySkill(event.target.value)}><option value="all">All skills</option>{skills.map((skill) => <option key={skill.id} value={skill.id}>{skill.name}</option>)}</select>{sessions.length > 0 && <button className="icon-button destructive" onClick={() => void removeAllSessions()} aria-label="Delete all training history"><Trash2 size={16} /></button>}</div></div>
+            <div className="history-heading"><div><div className="eyebrow">YOUR LOCAL TRAINING LOG</div><h1>Keep showing up.</h1><p className="lede">Your sessions are stored on this device. They are never sent to a server.</p></div><div className="history-tools"><select aria-label="Filter by category" value={historyCategory} onChange={(event) => setHistoryCategory(event.target.value)}><option value="all">All categories</option>{categories.filter((item) => item.id !== 'all').map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select><select aria-label="Filter by skill" value={historySkill} onChange={(event) => setHistorySkill(event.target.value)}><option value="all">All skills</option>{skills.map((skill) => <option key={skill.id} value={skill.id}>{skill.name}</option>)}</select><select aria-label="Filter by date" value={historyPeriod} onChange={(event) => setHistoryPeriod(event.target.value)}><option value="all">Any date</option><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option></select>{sessions.length > 0 && <button className="icon-button destructive" onClick={() => void removeAllSessions()} aria-label="Delete all training history"><Trash2 size={16} /></button>}</div></div>
             {filteredHistory.length ? <div className="history-table panel"><div className="history-table-head"><span>SESSION</span><span>TECHNIQUE</span><span>REPS / HOLD</span><span>DATE</span><span /></div>
               {filteredHistory.map((session) => <div className="history-table-row" key={session.id}><button className="history-session" onClick={() => openSession(session)}><span className="history-thumb"><Activity size={16} /></span><span><strong>{session.skillName}</strong><small>{getSkill(session.skillId)?.categoryName ?? 'Calisthenics'}</small></span></button><div className="history-score">{session.report.score === null ? <span className="score-muted">No score</span> : <><strong>{session.report.score}</strong><small>/100</small></>}</div><div className="history-stat">{session.report.validReps ? `${session.report.validReps} reps` : formatTime(session.report.longestHold)}</div><div className="history-date">{new Date(session.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</div><button className="icon-button" onClick={() => void removeSession(session.id)} aria-label={`Delete ${session.skillName} session`}><Trash2 size={15} /></button></div>)}
-              </div> : <EmptyState title={sessions.length ? 'No sessions for this skill' : 'No sessions yet'} text={sessions.length ? 'Select a different progression filter.' : 'Choose a skill, record or upload a video, and save your first analysis.'} action={sessions.length ? 'Show all skills' : 'Choose a skill'} onClick={() => sessions.length ? setHistorySkill('all') : setScreen('select')} />}
+              </div> : <EmptyState title={sessions.length ? 'No sessions match these filters' : 'No sessions yet'} text={sessions.length ? 'Choose a wider date range or clear one of the filters.' : 'Choose a skill, record or upload a video, and save your first analysis.'} action={sessions.length ? 'Clear filters' : 'Choose a skill'} onClick={() => sessions.length ? (setHistorySkill('all'), setHistoryCategory('all'), setHistoryPeriod('all')) : setScreen('select')} />}
             <div className="storage-note"><ShieldCheck size={16} /><span>Local storage · {sessions.length} {sessions.length === 1 ? 'session' : 'sessions'} · Delete any session or clear all data at any time.</span></div>
           </section>
         )}
@@ -578,6 +606,23 @@ function App() {
 
 function StatCard({ label, value, suffix, note, icon }: { label: string; value: string; suffix?: string; note: string; icon: ReactNode }) {
   return <div className="stat-card panel"><div className="stat-top"><span>{label}</span><span className="stat-icon">{icon}</span></div><div className="stat-value">{value}<small>{suffix}</small></div><div className="stat-note">{note}</div></div>
+}
+
+function ScoreTrend({ sessions }: { sessions: TrainingSession[] }) {
+  const scored = sessions.filter((session) => session.report.score !== null).slice(0, 8).reverse()
+  const points = scored.map((session, index) => ({
+    x: scored.length === 1 ? 160 : 10 + index * (300 / (scored.length - 1)),
+    y: 67 - ((session.report.score ?? 0) / 100) * 55,
+  }))
+  return <div className="score-trend">
+    <div className="trend-heading"><span>TECHNIQUE SCORE TREND</span><strong>{scored[scored.length - 1]?.report.score} <small>latest</small></strong></div>
+    <svg viewBox="0 0 320 82" role="img" aria-label="Technique score trend across recent sessions">
+      <line x1="8" y1="12" x2="312" y2="12" /><line x1="8" y1="67" x2="312" y2="67" />
+      <polyline points={points.map((point) => `${point.x},${point.y}`).join(' ')} />
+      {points.map((point, index) => <circle key={scored[index].id} cx={point.x} cy={point.y} r="3.2"><title>{scored[index].skillName}: {scored[index].report.score}/100</title></circle>)}
+    </svg>
+    <div className="trend-dates"><span>{new Date(scored[0].date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span><span>{scored.length} scored sessions</span><span>{new Date(scored[scored.length - 1].date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span></div>
+  </div>
 }
 
 function EmptyState({ title, text, action, onClick }: { title: string; text: string; action: string; onClick: () => void }) {
