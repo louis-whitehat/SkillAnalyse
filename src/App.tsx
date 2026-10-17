@@ -21,6 +21,7 @@ const emptyReport = (): AnalysisReport => ({
   score: null, confidence: 0, insufficientConfidence: true, framesAnalyzed: 0, validReps: 0, partialReps: 0,
   longestHold: 0, totalHold: 0, repConfidence: [], criteria: [], issues: [], positives: [], suggestions: [], timestampExamples: [],
 })
+const errorMessage = (reason: unknown) => reason instanceof Error ? reason.message : String(reason)
 const navItems = [
   { id: 'home' as const, label: 'Overview', icon: Activity },
   { id: 'select' as const, label: 'Analyze skill', icon: Plus },
@@ -69,6 +70,7 @@ function App() {
   const streamRef = useRef<MediaStream | null>(null)
   const landmarkerRef = useRef<PoseLandmarker | null>(null)
   const analyzerRef = useRef<SkillAnalyzer | null>(null)
+  const analysisSetupRef = useRef(false)
   const rafRef = useRef<number | null>(null)
   const lastVideoTimeRef = useRef(-1)
   const pausedRef = useRef(false)
@@ -244,10 +246,12 @@ function App() {
   }
 
   const beginRecording = async () => {
+    if (analysisSetupRef.current) return
     if (!selectedSkill || !cameraRef.current || !cameraActive) {
       setError('Select a skill and start the camera before recording.')
       return
     }
+    analysisSetupRef.current = true
     setError('')
     setLoading(true)
     setLoadingMessage('Preparing pose analysis…')
@@ -300,9 +304,10 @@ function App() {
       }, 1000)
     } catch (reason) {
       console.error('Pose model could not be initialized.', reason)
-      setError('Pose model could not load. Check your connection: the model and runtime are downloaded once from public CDNs. Your video is not uploaded.')
+      setError(`Pose analysis could not initialize from the app's local assets. Check the deployed site's models/pose_landmarker_lite.task and mediapipe/wasm files. ${errorMessage(reason)}`)
       setCountdown(0)
     } finally {
+      analysisSetupRef.current = false
       setLoading(false)
       setLoadingMessage('')
     }
@@ -351,8 +356,10 @@ function App() {
   }
 
   const analyzeUploadedVideo = async () => {
+    if (analysisSetupRef.current) return
     const video = uploadRef.current
     if (!selectedSkill || !video || !uploadedVideo) return
+    analysisSetupRef.current = true
     setError('')
     setLoading(true)
     setLoadingMessage('Preparing local pose analysis…')
@@ -365,8 +372,9 @@ function App() {
       inferenceLoop(video, () => video.currentTime)
     } catch (reason) {
       console.error('Uploaded video analysis failed.', reason)
-      setError('Could not analyze this video. Try a standard MP4 or WebM file and keep the entire athlete visible.')
+      setError(`Could not start pose analysis for this video. Check that it is a supported MP4 or WebM and that the local pose assets loaded. ${errorMessage(reason)}`)
     } finally {
+      analysisSetupRef.current = false
       setLoading(false)
       setLoadingMessage('')
     }
@@ -532,11 +540,11 @@ function App() {
                     {!cameraActive ? <button className="button-primary" onClick={() => void startCamera()} disabled={loading}>{loading ? <><span className="spinner" />{loadingMessage}</> : <><Video size={16} /> Start camera</>}</button>
                       : !recording ? <button className="button-primary record-button" onClick={() => void beginRecording()} disabled={loading || countdown > 0}>{loading ? <><span className="spinner" />{loadingMessage || 'Loading model…'}</> : <><span className="record-dot" /> Record session</>}</button>
                         : <div className="record-buttons">{paused ? <button className="button-primary" onClick={resumeRecording}><Play size={15} /> Resume</button> : <button className="button-secondary" onClick={pauseRecording}><span className="pause-symbol" /> Pause</button>}<button className="button-danger" onClick={stopRecording}><Square size={14} fill="currentColor" /> Finish</button></div>}
-                    <button className="upload-inline" onClick={() => fileInputRef.current?.click()} disabled={recording}><Upload size={16} /> Upload</button>
+                    <button className="upload-inline" onClick={() => fileInputRef.current?.click()} disabled={recording || loading}><Upload size={16} /> Upload</button>
                   </> : <>
-                    <button className="camera-switch" onClick={() => { setMediaMode('camera'); setUploadedVideo(null) }}><Video size={16} /> Use camera</button>
+                    <button className="camera-switch" onClick={() => { setMediaMode('camera'); setUploadedVideo(null) }} disabled={loading}><Video size={16} /> Use camera</button>
                     <button className="button-primary" onClick={() => analysisRunning ? finishUploadedAnalysis() : void analyzeUploadedVideo()} disabled={loading || !uploadedUrl}>{loading ? <><span className="spinner" />{loadingMessage}</> : analysisRunning ? <><Square size={14} fill="currentColor" /> Finish analysis</> : <><Activity size={16} /> Analyze video</>}</button>
-                    <button className="upload-inline" onClick={() => fileInputRef.current?.click()}><Upload size={16} /> Replace</button>
+                    <button className="upload-inline" onClick={() => fileInputRef.current?.click()} disabled={loading}><Upload size={16} /> Replace</button>
                   </>}
                   <input ref={fileInputRef} type="file" accept="video/*" hidden onChange={(event) => { selectVideo(event.target.files?.[0]); event.target.value = '' }} />
                 </div>

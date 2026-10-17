@@ -22,7 +22,7 @@ To deploy, publish the generated `dist/` directory to any static HTTPS host (for
 
 ## Privacy and model setup
 
-Pose inference and analysis run in the browser. The MediaPipe WASM runtime is loaded from jsDelivr and the Pose Landmarker Lite model from Google Cloud Storage on first use; an internet connection is required for that initial download. The camera feed and uploaded video are not sent to those services or to an application server. After inference, session metadata and, when available, the recording are kept in this browser's IndexedDB. Browser storage limits vary; a large video may not fit. The training log allows deleting individual sessions or all locally stored data.
+Pose inference and analysis run in the browser. MediaPipe Tasks Vision 1.1.1 is pinned and bundled with the app; its matching WASM runtime and the Pose Landmarker Lite model are included as local public assets in the production build. No runtime CDN connection is needed to initialize pose detection. The camera feed and uploaded video are not sent to a server. After inference, session metadata and, when available, the recording are kept in this browser's IndexedDB. Browser storage limits vary; a large video may not fit. The training log allows deleting individual sessions or all locally stored data.
 
 The camera uses `getUserMedia()` and recordings use `MediaRecorder` when supported. Browser, device, and selected camera capabilities determine available codecs and camera switching behavior.
 

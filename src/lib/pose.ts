@@ -1,8 +1,9 @@
 import { FilesetResolver, PoseLandmarker } from '@mediapipe/tasks-vision'
 import type { PosePoint } from '../types'
 
-const wasmRoot = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm'
-const modelUrl = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task'
+const assetUrl = (path: string) => new URL(`${import.meta.env.BASE_URL}${path}`, document.baseURI).href
+const wasmRoot = assetUrl('mediapipe/wasm/')
+const modelUrl = assetUrl('models/pose_landmarker_lite.task')
 let landmarkerPromise: Promise<PoseLandmarker> | undefined
 
 export function loadPoseLandmarker(onProgress?: (message: string) => void): Promise<PoseLandmarker> {

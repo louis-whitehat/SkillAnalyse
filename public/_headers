@@ -1,0 +1,5 @@
+/mediapipe/wasm/*.wasm
+  Content-Type: application/wasm
+
+/models/*.task
+  Content-Type: application/octet-stream
