@@ -18,5 +18,18 @@ export function analyzeSkillFrame(skill: Skill, points: PosePoint[]): SkillFrame
       return analyzePushUp(points)
     case 'bent-arm-press':
       return analyzeBentArmPress(points)
+    default:
+      return {
+        confidence: 0,
+        alignment: 0,
+        symmetry: 0,
+        jointExtension: 0,
+        kneeAngle: 0,
+        hipAngle: 0,
+        elbowAngle: 0,
+        elbowAsymmetry: 0,
+        frontLine: 0,
+        verticalDeviation: 0,
+      }
   }
 }

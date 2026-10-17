@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Children, cloneElement, isValidElement, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   Activity, ArrowDownRight, ArrowRight, Check, ChevronDown, CircleAlert, Clock3,
@@ -8,15 +8,17 @@ import {
 import type { PoseLandmarker } from '@mediapipe/tasks-vision'
 import { useRegisterSW } from 'virtual:pwa-register/react'
 import { categories, getSkill, skills } from './data/skills'
+import { ComboLibrary } from './components/ComboLibrary'
 import { formatTime, SkillAnalyzer } from './lib/analyzer'
 import { ComboAnalyzer } from './lib/comboAnalyzer'
 import { FreestyleAnalyzer } from './lib/freestyleAnalyzer'
+import { translate, type Language } from './lib/language'
 import { detectPose, loadPoseLandmarker } from './lib/pose'
 import { clearSessions, deleteSession, listSessions, saveSession } from './lib/storage'
 import type { AnalysisReport, ComboStep, ComboStepKind, FreestyleSegment, FreestyleSkillKind, LiveMetrics, PosePoint, Skill, TrainingSession } from './types'
 import './App.css'
 
-type Screen = 'home' | 'select' | 'session' | 'report' | 'history'
+type Screen = 'home' | 'select' | 'skill-detail' | 'session' | 'report' | 'history'
 type MediaMode = 'camera' | 'upload'
 interface InstallPromptEvent extends Event {
   prompt: () => Promise<void>
@@ -38,6 +40,18 @@ const movementRangeLabels: Record<AnalysisReport['movementRange'], string> = {
 }
 const movementRangeLabel = (range: AnalysisReport['movementRange'] | undefined) => range ? movementRangeLabels[range] : 'Not recorded'
 const errorMessage = (reason: unknown) => reason instanceof Error ? reason.message : String(reason)
+const loadStringList = (key: string, description: string) => {
+  try {
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(key) ?? '[]')
+    if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === 'string')) {
+      throw new Error(`Stored ${description} must be a list of strings.`)
+    }
+    return parsed
+  } catch (reason) {
+    console.warn(`Could not load ${description}.`, reason)
+    return []
+  }
+}
 const navItems = [
   { id: 'home' as const, label: 'Overview', icon: Activity },
   { id: 'select' as const, label: 'Analyze skill', icon: Plus },
@@ -64,10 +78,25 @@ const freestyleLabels: Array<{ kind: FreestyleSkillKind; label: string }> = [
 ]
 
 function App() {
+  const [language, setLanguage] = useState<Language>(() => {
+    try {
+      return window.localStorage.getItem('skillanalyse-language') === 'de' ? 'de' : 'en'
+    } catch (reason) {
+      console.warn('Could not load language preference.', reason)
+      return 'en'
+    }
+  })
+  const t = useCallback((value: string) => translate(value, language), [language])
+  const locale = language === 'de' ? 'de-DE' : 'en-US'
   const [screen, setScreen] = useState<Screen>('home')
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null)
   const [category, setCategory] = useState<string>('all')
   const [difficulty, setDifficulty] = useState('all')
+  const [equipment, setEquipment] = useState('all')
+  const [skillSort, setSkillSort] = useState<'difficulty' | 'alphabetical'>('difficulty')
+  const [favoritesOnly, setFavoritesOnly] = useState(false)
+  const [favoriteSkills, setFavoriteSkills] = useState<string[]>(() => loadStringList('skillanalyse-favorite-skills', 'favorite skills'))
+  const [recentSkillIds, setRecentSkillIds] = useState<string[]>(() => loadStringList('skillanalyse-recent-skills', 'recent skill IDs'))
   const [query, setQuery] = useState('')
   const [comboEditorOpen, setComboEditorOpen] = useState(false)
   const [comboMode, setComboMode] = useState(false)
@@ -107,6 +136,26 @@ function App() {
   const [historyCategory, setHistoryCategory] = useState('all')
   const [historyPeriod, setHistoryPeriod] = useState('all')
   const [historyAnchor] = useState(() => Date.now())
+  const [manualRepetitions, setManualRepetitions] = useState(0)
+  const [manualHold, setManualHold] = useState(0)
+  const [freestylePrompt, setFreestylePrompt] = useState('')
+
+  useEffect(() => {
+    document.documentElement.lang = language
+    try {
+      window.localStorage.setItem('skillanalyse-language', language)
+    } catch (reason) {
+      console.warn('Could not save language preference.', reason)
+    }
+  }, [language])
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('skillanalyse-favorite-skills', JSON.stringify(favoriteSkills))
+    } catch (reason) {
+      console.warn('Could not save favorite skills.', reason)
+    }
+  }, [favoriteSkills])
 
   const cameraRef = useRef<HTMLVideoElement>(null)
   const uploadRef = useRef<HTMLVideoElement>(null)
@@ -191,8 +240,22 @@ function App() {
   const filteredSkills = useMemo(() => skills.filter((skill) =>
     (category === 'all' || skill.category === category) &&
     (difficulty === 'all' || (difficulty === 'beginner' ? skill.level <= 2 : difficulty === 'intermediate' ? skill.level === 3 : skill.level >= 4)) &&
-    `${skill.name} ${skill.categoryName}`.toLowerCase().includes(query.toLowerCase()),
-  ), [category, difficulty, query])
+    (equipment === 'all' || skill.equipment.includes(equipment)) &&
+    (!favoritesOnly || favoriteSkills.includes(skill.id)) &&
+    `${skill.name} ${skill.categoryName} ${t(skill.name)} ${t(skill.categoryName)}`.toLowerCase().includes(query.toLowerCase()),
+  ).sort((left, right) => skillSort === 'alphabetical'
+    ? t(left.name).localeCompare(t(right.name), language)
+    : left.level - right.level || t(left.name).localeCompare(t(right.name), language)), [category, difficulty, equipment, favoritesOnly, favoriteSkills, query, skillSort, t, language])
+
+  const localizeSkill = (skill: Skill): Skill => ({
+    ...skill,
+    name: t(skill.name),
+    categoryName: t(skill.categoryName),
+    description: t(skill.description),
+    camera: t(skill.camera),
+    checkpoints: skill.checkpoints.map(t),
+    cues: skill.cues.map(t),
+  })
 
   const recentSessions = sessions.slice(0, 4)
   const bestScore = sessions.reduce((best, session) => Math.max(best, session.report.score ?? 0), 0)
@@ -210,8 +273,54 @@ function App() {
     setComboMode(false)
     setComboEditorOpen(false)
     setMeasureHold(skill.type !== 'dynamic')
-    setScreen('session')
+    setScreen('skill-detail')
     setError('')
+    const recent = [skill.id, ...recentSkillIds.filter((id) => id !== skill.id)].slice(0, 8)
+    setRecentSkillIds(recent)
+    try {
+      window.localStorage.setItem('skillanalyse-recent-skills', JSON.stringify(recent))
+    } catch (reason) {
+      console.warn('Could not save recently viewed skills.', reason)
+    }
+  }
+
+  const toggleFavorite = (skillId: string) => setFavoriteSkills((previous) =>
+    previous.includes(skillId) ? previous.filter((id) => id !== skillId) : [...previous, skillId],
+  )
+
+  const startSelectedSkillAnalysis = () => {
+    if (!selectedSkill || selectedSkill.analysisSupport === 'manual') return
+    setScreen('session')
+  }
+
+  const saveManualSkillLog = async () => {
+    if (!selectedSkill || selectedSkill.analysisSupport !== 'manual') return
+    const report: AnalysisReport = {
+      ...emptyReport(),
+      validReps: manualRepetitions,
+      longestHold: manualHold,
+      totalHold: manualHold,
+      limitations: ['Manually logged by the athlete; no camera analysis or technique score was produced.'],
+    }
+    const session: TrainingSession = {
+      id: crypto.randomUUID(),
+      date: new Date().toISOString(),
+      skillId: selectedSkill.id,
+      skillName: selectedSkill.name,
+      category: selectedSkill.category,
+      report,
+      settings: { targetReps, measureHold: true, targetHold, focus: '', positionTolerance, smoothingStrength },
+    }
+    setActiveSession(session)
+    try {
+      await saveSession(session)
+      setSessions((previous) => [session, ...previous])
+    } catch (reason) {
+      console.error('Could not save manual skill log.', reason)
+      setSessions((previous) => [session, ...previous])
+      setError('The manual entry is visible but could not be saved to local storage.')
+    }
+    setScreen('report')
   }
 
   const stopInference = useCallback(() => {
@@ -528,7 +637,7 @@ function App() {
   }
 
   const removeAllSessions = async () => {
-    if (!window.confirm('Delete all locally stored training sessions and videos? This cannot be undone.')) return
+    if (!window.confirm(t('Delete all locally stored training sessions and videos? This cannot be undone.'))) return
     try {
       await clearSessions()
       setSessions([])
@@ -573,7 +682,7 @@ function App() {
     setScreen('session')
   }
 
-  const startFreestyle = () => {
+  const startFreestyle = (referenceName?: string) => {
     if (recording || analysisRunning || countdown > 0 || loading) {
       setError('Finish or stop the active analysis before starting Freestyle.')
       return
@@ -585,6 +694,7 @@ function App() {
     }
     setSelectedSkill(baseSkill)
     setFreestyleMode(true)
+    setFreestylePrompt(referenceName ?? '')
     setComboMode(false)
     setUploadedVideo(null)
     setMediaMode('camera')
@@ -715,15 +825,15 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <button className="brand" onClick={() => navigateTo('home')} aria-label="CaliTracker home">
+        <button className="brand" onClick={() => navigateTo('home')} aria-label={t('CaliTracker home')}>
           <span className="brand-mark"><Activity size={20} strokeWidth={2.5} /></span>
           <span>CALITRACKER</span>
         </button>
-        <div className="sidebar-label">WORKSPACE</div>
-        <nav className="side-nav" aria-label="Main navigation">
+        <div className="sidebar-label">{t('WORKSPACE')}</div>
+        <nav className="side-nav" aria-label={t('Main navigation')}>
           {navItems.map(({ id, label, icon: Icon }) => (
             <button key={id} className={`nav-item ${(id === 'freestyle' ? screen === 'session' && freestyleMode || screen === 'report' && Boolean(activeSession?.freestyle) : screen === id) ? 'active' : ''}`} onClick={() => id === 'freestyle' ? startFreestyle() : navigateTo(id)}>
-              <Icon size={18} /><span>{label}</span>
+              <Icon size={18} /><span>{t(label)}</span>
               {id === 'history' && sessions.length > 0 && <span className="nav-count">{sessions.length}</span>}
             </button>
           ))}
@@ -731,33 +841,35 @@ function App() {
         <div className="sidebar-bottom">
           <div className="privacy-card">
             <ShieldCheck size={17} />
-            <div><strong>Your data stays yours</strong><span>Analysis runs on this device.</span></div>
+            <div><strong>{t('Your data stays yours')}</strong><span>{t('Analysis runs on this device.')}</span></div>
           </div>
-          <div className="profile-mini"><div className="avatar">A</div><div><strong>Athlete</strong><span>Personal workspace</span></div><ChevronDown size={15} /></div>
+          <div className="profile-mini"><div className="avatar">A</div><div><strong>{t('Athlete')}</strong><span>{t('Personal workspace')}</span></div><ChevronDown size={15} /></div>
         </div>
       </aside>
 
       <main className="main-area">
+        <LocalizedContent language={language}>
         <header className="topbar">
-          <div className="breadcrumb"><span>TRAINING</span><span className="crumb-slash">/</span><strong>{freestyleMode && screen === 'session' ? 'Freestyle' : screen === 'home' ? 'Overview' : screen === 'select' ? 'Skill library' : screen === 'session' ? 'New analysis' : screen === 'report' ? 'Session report' : 'Training log'}</strong></div>
+          <div className="breadcrumb"><span>{t('TRAINING')}</span><span className="crumb-slash">/</span><strong>{t(freestyleMode && screen === 'session' ? 'Freestyle' : screen === 'home' ? 'Overview' : screen === 'select' || screen === 'skill-detail' ? 'Skill library' : screen === 'session' ? 'New analysis' : screen === 'report' ? 'Session report' : 'Training log')}</strong></div>
           <div className="topbar-actions">
-            {!appInstalled && <button className="topbar-cta install-action" onClick={() => void installApp()} aria-label={installPrompt ? 'Install CaliTracker' : 'Show installation instructions'}><Download size={15} /><span>{installPrompt ? 'Install app' : 'Install'}</span></button>}
-            <button className="topbar-cta" onClick={() => { setError(''); navigateTo('select') }} aria-label="New skill analysis" title="New analysis"><Plus size={16} /><span>New analysis</span></button>
-            <button className="topbar-cta" onClick={startFreestyle} aria-label="Start Freestyle" title="Freestyle"><Sparkles size={15} /><span>Freestyle</span></button>
+            <label className="language-switch"><span>{t('Language')}</span><select aria-label={t('Select language')} value={language} onChange={(event) => setLanguage(event.target.value as Language)}><option value="en">English</option><option value="de">Deutsch</option></select></label>
+            {!appInstalled && <button className="topbar-cta install-action" onClick={() => void installApp()} aria-label={t(installPrompt ? 'Install CaliTracker' : 'Show installation instructions')}><Download size={15} /><span>{t(installPrompt ? 'Install app' : 'Install')}</span></button>}
+            <button className="topbar-cta" onClick={() => { setError(''); navigateTo('select') }} aria-label={t('New skill analysis')} title={t('New analysis')}><Plus size={16} /><span>{t('New analysis')}</span></button>
+            <button className="topbar-cta" onClick={() => startFreestyle()} aria-label={t('Start Freestyle')} title={t('Freestyle')}><Sparkles size={15} /><span>{t('Freestyle')}</span></button>
           </div>
         </header>
 
-        {showInstallHelp && !appInstalled && <div className="pwa-notice" role="status"><Smartphone size={17} /><span>To install, open this site’s browser menu and choose “Install app” or “Add to Home screen”. Installation requires HTTPS.</span><button aria-label="Dismiss installation instructions" onClick={() => setShowInstallHelp(false)}><X size={16} /></button></div>}
-        {offlineReady && <div className="pwa-notice" role="status"><ShieldCheck size={17} /><span>The app shell is available offline. Pose model files are cached after they are first loaded while online.</span><button aria-label="Dismiss offline status" onClick={() => setOfflineReady(false)}><X size={16} /></button></div>}
-        {needRefresh && <div className="pwa-notice" role="status"><RotateCcw size={17} /><span>An app update is ready. Finish any active recording before updating.</span><button className="pwa-update" onClick={() => void updateServiceWorker(true)} disabled={recording || analysisRunning || countdown > 0 || loading}>Update now</button><button aria-label="Dismiss update notice" onClick={() => setNeedRefresh(false)}><X size={16} /></button></div>}
-        {pwaError && <div className="global-alert" role="alert"><CircleAlert size={17} /><span>{pwaError}</span><button aria-label="Dismiss offline support error" onClick={() => setPwaError('')}><X size={16} /></button></div>}
-        {error && <div className="global-alert" role="alert"><CircleAlert size={17} /><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError('')}><X size={16} /></button></div>}
+        {showInstallHelp && !appInstalled && <div className="pwa-notice" role="status"><Smartphone size={17} /><span>{t('To install, open this site’s browser menu and choose “Install app” or “Add to Home screen”. Installation requires HTTPS.')}</span><button aria-label={t('Dismiss installation instructions')} onClick={() => setShowInstallHelp(false)}><X size={16} /></button></div>}
+        {offlineReady && <div className="pwa-notice" role="status"><ShieldCheck size={17} /><span>{t('The app shell is available offline. Pose model files are cached after they are first loaded while online.')}</span><button aria-label={t('Dismiss offline status')} onClick={() => setOfflineReady(false)}><X size={16} /></button></div>}
+        {needRefresh && <div className="pwa-notice" role="status"><RotateCcw size={17} /><span>{t('An app update is ready. Finish any active recording before updating.')}</span><button className="pwa-update" onClick={() => void updateServiceWorker(true)} disabled={recording || analysisRunning || countdown > 0 || loading}>{t('Update now')}</button><button aria-label={t('Dismiss update notice')} onClick={() => setNeedRefresh(false)}><X size={16} /></button></div>}
+        {pwaError && <div className="global-alert" role="alert"><CircleAlert size={17} /><span>{t(pwaError)}</span><button aria-label={t('Dismiss offline support error')} onClick={() => setPwaError('')}><X size={16} /></button></div>}
+        {error && <div className="global-alert" role="alert"><CircleAlert size={17} /><span>{t(error)}</span><button aria-label={t('Dismiss error')} onClick={() => setError('')}><X size={16} /></button></div>}
 
         {screen === 'home' && (
           <section className="page-content">
             <div className="welcome-row">
               <div><div className="eyebrow"><span className="live-dot" /> YOUR PERSONAL MOVEMENT LAB</div><h1>Train with <em>intention.</em></h1><p className="lede">Build strength skill by skill. Your progress, measured on your terms.</p></div>
-              <div className="welcome-actions"><button className="button-primary welcome-action" onClick={() => setScreen('select')}><Plus size={18} /> Start a session <ArrowRight size={16} /></button><button className="button-secondary welcome-action" onClick={startFreestyle}><Sparkles size={17} /> Freestyle</button></div>
+              <div className="welcome-actions"><button className="button-primary welcome-action" onClick={() => setScreen('select')}><Plus size={18} /> Start a session <ArrowRight size={16} /></button><button className="button-secondary welcome-action" onClick={() => startFreestyle()}><Sparkles size={17} /> Freestyle</button></div>
             </div>
             <div className="stat-grid">
               <StatCard label="Sessions logged" value={String(sessions.length).padStart(2, '0')} note="On this device" icon={<Dumbbell size={18} />} />
@@ -768,9 +880,9 @@ function App() {
               <section className="panel progress-panel">
                 <div className="panel-heading"><div><div className="eyebrow">YOUR JOURNEY</div><h2>Recent sessions</h2></div><button className="text-button" onClick={showHistory}>View all <ArrowRight size={15} /></button></div>
                 {recentSessions.length ? <div className="session-list">
-                  {recentSessions.map((session) => <SessionRow key={session.id} session={session} onClick={() => openSession(session)} />)}
+                  {recentSessions.map((session) => <SessionRow key={session.id} session={session} language={language} onClick={() => openSession(session)} />)}
                 </div> : <EmptyState title="Your training starts here" text="Run your first skill analysis to build a personal progress timeline." action="Choose a skill" onClick={() => setScreen('select')} />}
-                {sessions.some((session) => session.report.score !== null) && <ScoreTrend sessions={sessions} />}
+                {sessions.some((session) => session.report.score !== null) && <ScoreTrend sessions={sessions} language={language} />}
               </section>
               <section className="panel spotlight-panel">
                 <div className="eyebrow">BUILT FOR YOUR NEXT REP</div><h2>One camera.<br /><em>Better awareness.</em></h2>
@@ -794,7 +906,7 @@ function App() {
               {comboEditorOpen && <div className="combo-step-list">
                 {comboSteps.map((step, index) => {
                   const options = skills.filter((skill) => step.kind === 'press'
-                    ? skill.category === 'bent-arm-press' || skill.name === 'Handstand Kick-Up'
+                    ? skill.category === 'bent-arm-press' || skill.name === 'Handstand Kick-Up' || skill.name.includes('Press to Handstand')
                     : step.kind === 'hold'
                       ? skill.category === 'handstand' && skill.type !== 'dynamic'
                       : skill.category === 'handstand-push-up')
@@ -822,18 +934,36 @@ function App() {
               </div>}
               {!comboEditorOpen && <div className="combo-preview">{comboSteps.map((step, index) => <span key={step.id}><b>{index + 1}</b>{step.name} · {step.repetitions} rep{step.repetitions === 1 ? '' : 's'}{step.holdSeconds > 0 ? ` · ${step.holdSeconds}s` : ''}</span>)}</div>}
             </section>
+            <ComboLibrary language={language} onFreestyle={startFreestyle} />
             <div className="library-tools"><label className="search-field"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search skills…" aria-label="Search skills" />{query && <button onClick={() => setQuery('')} aria-label="Clear search"><X size={15} /></button>}</label>
               <label className="difficulty-filter"><span>DIFFICULTY</span><select aria-label="Filter by difficulty" value={difficulty} onChange={(event) => setDifficulty(event.target.value)}><option value="all">All levels</option><option value="beginner">Beginner · 1–2</option><option value="intermediate">Intermediate · 3</option><option value="advanced">Advanced · 4–5</option></select></label>
+              <label className="difficulty-filter"><span>{t('EQUIPMENT')}</span><select aria-label={t('Filter by equipment')} value={equipment} onChange={(event) => setEquipment(event.target.value)}><option value="all">{t('All equipment')}</option>{[...new Set(skills.flatMap((skill) => skill.equipment))].sort().map((item) => <option key={item} value={item}>{t(item)}</option>)}</select></label>
+              <label className="difficulty-filter"><span>{t('SORT')}</span><select aria-label={t('Sort skills')} value={skillSort} onChange={(event) => setSkillSort(event.target.value as 'difficulty' | 'alphabetical')}><option value="difficulty">{t('Difficulty')}</option><option value="alphabetical">{t('Alphabetical')}</option></select></label>
+              <label className="favorite-filter"><input type="checkbox" checked={favoritesOnly} onChange={(event) => setFavoritesOnly(event.target.checked)} /> {t('Favorites only')}</label>
               <div className="category-pills">{categories.map((item) => <button key={item.id} className={category === item.id ? 'selected' : ''} onClick={() => setCategory(item.id)}>{item.label}</button>)}</div>
             </div>
+            {recentSkillIds.length > 0 && <div className="recent-skills"><strong>{t('Recently viewed')}</strong>{recentSkillIds.map((id) => getSkill(id)).filter((skill): skill is Skill => Boolean(skill)).map((skill) => <button key={skill.id} onClick={() => chooseSkill(skill)}>{t(skill.name)}</button>)}</div>}
             {categories.filter((item) => item.id !== 'all' && (category === 'all' || category === item.id)).map((item) => {
               const group = filteredSkills.filter((skill) => skill.category === item.id)
               if (!group.length) return null
               return <div className="skill-group" key={item.id}><div className="group-title"><span className="category-indicator" />{item.label}<span className="group-count">{String(group.length).padStart(2, '0')}</span></div><div className="skill-grid">
-                {group.map((skill) => <SkillCard key={skill.id} skill={skill} onChoose={() => chooseSkill(skill)} />)}
+                {group.map((skill) => <SkillCard key={skill.id} skill={localizeSkill(skill)} language={language} favorite={favoriteSkills.includes(skill.id)} onFavorite={() => toggleFavorite(skill.id)} onChoose={() => chooseSkill(skill)} />)}
               </div></div>
             })}
             {filteredSkills.length === 0 && <EmptyState title="No matching skills" text="Try a different search term, category or difficulty." action="Clear filters" onClick={() => { setQuery(''); setCategory('all'); setDifficulty('all') }} />}
+          </section>
+        )}
+
+        {screen === 'skill-detail' && selectedSkill && (
+          <section className="page-content skill-detail-page">
+            <button className="back-link" onClick={() => setScreen('select')}>← {t('Skill library')}</button>
+            <div className="skill-detail-heading"><div><div className="eyebrow">{t(selectedSkill.categoryName)} · {t('Level')} {selectedSkill.level}{selectedSkill.difficultyTag ? ` · ${t(selectedSkill.difficultyTag)}` : ''}</div><h1>{t(selectedSkill.name)}</h1><p className="lede">{t(selectedSkill.description)}</p></div><button className="icon-button" aria-label={favoriteSkills.includes(selectedSkill.id) ? t('Remove from favorites') : t('Add to favorites')} onClick={() => toggleFavorite(selectedSkill.id)}>{favoriteSkills.includes(selectedSkill.id) ? '★' : '☆'}</button></div>
+            <div className="skill-detail-grid">
+              <section className="panel skill-detail-panel"><div className="eyebrow">{t('PROGRESSION')}</div><div className="progression-chain">{selectedSkill.regressions.map((item) => <span key={item}>{t(item)}</span>)}<strong>{t(selectedSkill.name)}</strong>{selectedSkill.progressions.map((item) => <span key={item}>{t(item)}</span>)}</div><h3>{t('Prerequisites')}</h3><ul>{selectedSkill.prerequisites.map((item) => <li key={item}>{t(item)}</li>)}</ul><h3>{t('Related skills')}</h3><div className="related-skills">{selectedSkill.relatedSkillIds.map((id) => getSkill(id)).filter((skill): skill is Skill => Boolean(skill)).map((skill) => <button key={skill.id} onClick={() => chooseSkill(skill)}>{t(skill.name)} <ArrowRight size={14} /></button>)}</div></section>
+              <section className="panel skill-detail-panel"><div className="eyebrow">{t('TECHNIQUE & SAFETY')}</div><h3>{t('Technique checkpoints')}</h3><ul>{selectedSkill.checkpoints.map((item) => <li key={item}>{t(item)}</li>)}</ul><h3>{t('Common errors')}</h3><ul>{selectedSkill.commonErrors.map((item) => <li key={item}>{t(item)}</li>)}</ul><h3>{t('Useful drills')}</h3><ul>{selectedSkill.drills.map((item) => <li key={item}>{t(item)}</li>)}</ul><h3>{t('Safety')}</h3><ul>{selectedSkill.safety.map((item) => <li key={item}>{t(item)}</li>)}</ul><p><strong>{t('Equipment')}:</strong> {selectedSkill.equipment.map(t).join(' · ')}</p></section>
+            </div>
+            <div className={`analysis-support support-${selectedSkill.analysisSupport}`}><strong>{t('Camera analysis')}: {t(selectedSkill.analysisSupport === 'automatic' ? 'Automatic analysis' : selectedSkill.analysisSupport === 'partial' ? 'Partially analyzable' : 'Manual documentation only')}</strong><span>{t(selectedSkill.analysisSupport === 'manual' ? 'The current pose model cannot reliably analyze this skill. Record reps and holds manually; no camera score or counts will be invented.' : 'Pose analysis is an estimate from visible 2D landmarks, not validated exercise recognition. Review the recording and treat results as approximate.')}</span></div>
+            {selectedSkill.analysisSupport === 'manual' ? <section className="panel manual-skill-log"><h2>{t('Manual training log')}</h2><div className="manual-log-fields"><label>{t('Completed reps')}<input type="number" min="0" max="999" value={manualRepetitions} onChange={(event) => setManualRepetitions(Math.max(0, Number(event.target.value) || 0))} /></label><label>{t('Hold seconds')}<input type="number" min="0" max="3600" value={manualHold} onChange={(event) => setManualHold(Math.max(0, Number(event.target.value) || 0))} /></label><button className="button-primary" onClick={() => void saveManualSkillLog()}>{t('Save manual entry')}</button></div></section> : <button className="button-primary" onClick={startSelectedSkillAnalysis}><Video size={16} /> {t('Start camera analysis')}</button>}
           </section>
         )}
 
@@ -877,7 +1007,7 @@ function App() {
               </div>
               <aside className="session-right">
                 <section className="panel setup-panel"><div className="panel-heading"><div><div className="eyebrow">{freestyleMode ? 'FREESTYLE MODE' : comboMode ? 'COMBO ORDER' : 'SESSION SETUP'}</div><h2>{freestyleMode ? 'Automatic pattern scan' : comboMode ? 'Planned sequence' : 'Make it yours'}</h2></div></div>
-                  {freestyleMode ? <><p className="freestyle-description">Freestyle starts without selecting a skill. It searches only for broad pose patterns already supported by the local model.</p><ul className="freestyle-support-list"><li>Handstand holds and visible HSPU elbow cycles</li><li>Horizontal front-lever-like body positions</li><li>Horizontal push-up patterns and elbow cycles</li></ul><div className="disclaimer"><CircleAlert size={15} /><p>Press intent, push-up variations, wall contact, pull-ups and muscle-ups are not reliably identifiable from these landmarks alone. Unclassified periods are labeled unknown, not guessed.</p></div></>
+                  {freestyleMode ? <><p className="freestyle-description">Freestyle starts without selecting a skill. It searches only for broad pose patterns already supported by the local model.</p>{freestylePrompt && <p className="freestyle-reference"><strong>{t('Reference sequence only')}:</strong> {t(freestylePrompt)}. {t('Freestyle does not enforce this order.')}</p>}<ul className="freestyle-support-list"><li>Handstand holds and visible HSPU elbow cycles</li><li>Horizontal front-lever-like body positions</li><li>Horizontal push-up patterns and elbow cycles</li></ul><div className="disclaimer"><CircleAlert size={15} /><p>Press intent, push-up variations, wall contact, pull-ups and muscle-ups are not reliably identifiable from these landmarks alone. Unclassified periods are labeled unknown, not guessed.</p></div></>
                     : comboMode ? <><ol className="combo-session-order">{comboSteps.map((step) => <li key={step.id}><span>{comboKindNames[step.kind]}</span><strong>{step.name}</strong><small>{step.description || `${step.repetitions} rep${step.repetitions === 1 ? '' : 's'}${step.holdSeconds > 0 ? ` · ${step.holdSeconds}s hold` : ''}`}</small></li>)}</ol><div className="disclaimer"><CircleAlert size={15} /><p>Automatic labels are estimates. The final timeline asks for confirmation where pose cues are ambiguous.</p></div></>
                     : <>
                   {selectedSkill.type === 'dynamic' && <div className="form-row"><label htmlFor="target-reps">Rep target</label><div className="number-control"><button onClick={() => setTargetReps(Math.max(1, targetReps - 1))} aria-label="Decrease rep target">−</button><input id="target-reps" type="number" min="1" max="50" value={targetReps} onChange={(event) => setTargetReps(Math.min(50, Math.max(1, Number(event.target.value) || 1)))} /><button onClick={() => setTargetReps(Math.min(50, targetReps + 1))} aria-label="Increase rep target">+</button></div></div>}
@@ -898,7 +1028,7 @@ function App() {
 
         {screen === 'report' && activeSession && (
           <section className="page-content report-page">
-            <div className="report-top"><div><button className="back-link" onClick={showHistory}>← Training log</button><div className="eyebrow">SESSION COMPLETE · {new Date(activeSession.date).toLocaleDateString(undefined, { dateStyle: 'medium' })}</div><h1>{activeSession.skillName}</h1><p className="lede">Your analysis is ready. Treat 2D estimates as training feedback, not a precise biomechanical measurement.</p>{activeSession.freestyle ? <p className="report-settings">{formatTime(activeSession.freestyle.duration)} duration · {activeSession.freestyle.segments.length} analyzed intervals · {activeSession.freestyle.reliableRepetitions} higher-confidence repetitions</p> : activeSession.combo ? <p className="report-settings">Sequence of {activeSession.combo.segments.length} planned steps · {formatTime(activeSession.combo.duration)} recording duration · local analysis</p> : <p className="report-settings">{activeSkill?.type === 'dynamic' ? `${activeSession.settings.targetReps} rep target · ` : ''}{activeSession.settings.measureHold ? `${activeSession.settings.targetHold}s hold target · ±${activeSession.settings.positionTolerance}° tolerance` : 'hold timer off'} · {activeSession.settings.smoothingStrength}% smoothing{activeSession.settings.focus ? ` · Focus: ${activeSession.settings.focus}` : ''}</p>}</div><button className="button-primary" onClick={resetWorkflow}><RotateCcw size={16} /> Analyze again</button></div>
+            <div className="report-top"><div><button className="back-link" onClick={showHistory}>← Training log</button><div className="eyebrow">SESSION COMPLETE · {new Date(activeSession.date).toLocaleDateString(locale, { dateStyle: 'medium' })}</div><h1>{activeSession.skillName}</h1><p className="lede">Your analysis is ready. Treat 2D estimates as training feedback, not a precise biomechanical measurement.</p>{activeSession.freestyle ? <p className="report-settings">{formatTime(activeSession.freestyle.duration)} duration · {activeSession.freestyle.segments.length} analyzed intervals · {activeSession.freestyle.reliableRepetitions} higher-confidence repetitions</p> : activeSession.combo ? <p className="report-settings">Sequence of {activeSession.combo.segments.length} planned steps · {formatTime(activeSession.combo.duration)} recording duration · local analysis</p> : <p className="report-settings">{activeSkill?.type === 'dynamic' ? `${activeSession.settings.targetReps} rep target · ` : ''}{activeSession.settings.measureHold ? `${activeSession.settings.targetHold}s hold target · ±${activeSession.settings.positionTolerance}° tolerance` : 'hold timer off'} · {activeSession.settings.smoothingStrength}% smoothing{activeSession.settings.focus ? ` · Focus: ${activeSession.settings.focus}` : ''}</p>}</div><button className="button-primary" onClick={resetWorkflow}><RotateCcw size={16} /> Analyze again</button></div>
             <div className="analysis-context panel"><div><span className="eyebrow">{activeSession.freestyle ? 'AUTOMATIC FREESTYLE SCAN' : activeSession.combo ? 'COMBO SEQUENCE' : 'SELECTED EXERCISE'}</span><strong>{activeSession.skillName}</strong><small>{activeSession.freestyle ? activeSession.freestyle.note : activeSession.combo ? 'Each step is estimated from pose cues, not independently recognized.' : `${activeSkill?.categoryName ?? 'Calisthenics'} · Level ${activeSkill?.level ?? '—'} · Exercise identity is selected, not independently recognized by the camera.`}</small></div>{activeSkill && !activeSession.freestyle && <p><Video size={15} /> Recommended view: {activeSkill.camera}</p>}</div>
             {activeSession.report.insufficientConfidence && <div className="confidence-alert"><CircleAlert size={18} /><div><strong>Not enough reliable pose evidence for a score</strong><span>Check lighting and framing. Recommended view: {activeSkill?.camera ?? 'keep the full body visible'}. No score was invented.</span></div></div>}
             <div className="report-summary">
@@ -953,7 +1083,7 @@ function App() {
                 {activeSession.report.repConfidence.length > 0 && <div className="rep-confidence"><strong>REP LANDMARK CONFIDENCE</strong><div>{activeSession.report.repConfidence.map((confidence, index) => <span key={`${index}-${confidence}`}>#{index + 1} <b>{Math.round(confidence * 100)}%</b></span>)}</div><small>Visibility confidence at each completed rep; not a form-quality score.</small></div>}
               </div>
               <section className="recent-attempts panel"><div className="panel-heading"><div><div className="eyebrow">PERSONAL TREND</div><h2>Recent {activeSession.skillName} attempts</h2></div></div>
-                {recentSkillSessions.length ? <div className="attempt-list">{recentSkillSessions.map((session) => <button className="attempt-row" key={session.id} onClick={() => openSession(session)}><span>{new Date(session.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span><strong>{activeSkill?.type === 'dynamic' ? `${session.report.validReps} reps` : formatTime(session.report.longestHold)}</strong><small>{session.report.score === null ? 'No reliable score' : `Estimated score · ${session.report.score}/100`}</small><ArrowRight size={15} /></button>)}</div> : <p>No earlier attempts for this exercise have been saved on this device.</p>}
+                {recentSkillSessions.length ? <div className="attempt-list">{recentSkillSessions.map((session) => <button className="attempt-row" key={session.id} onClick={() => openSession(session)}><span>{new Date(session.date).toLocaleDateString(locale, { month: 'short', day: 'numeric' })}</span><strong>{activeSkill?.type === 'dynamic' ? `${session.report.validReps} reps` : formatTime(session.report.longestHold)}</strong><small>{session.report.score === null ? 'No reliable score' : `Estimated score · ${session.report.score}/100`}</small><ArrowRight size={15} /></button>)}</div> : <p>No earlier attempts for this exercise have been saved on this device.</p>}
               </section>
               <div className="panel notes-panel"><div className="eyebrow">COACHING NOTES</div><h2>What we noticed</h2>
                 <div className="note-section"><strong className="note-positive">GOOD SIGNALS</strong>{activeSession.report.positives.map((item) => <p key={item}><Check size={14} />{item}</p>)}</div>
@@ -969,13 +1099,14 @@ function App() {
           <section className="page-content">
             <div className="history-heading"><div><div className="eyebrow">YOUR LOCAL TRAINING LOG</div><h1>Keep showing up.</h1><p className="lede">Your sessions are stored on this device. They are never sent to a server.</p></div><div className="history-tools"><select aria-label="Filter by category" value={historyCategory} onChange={(event) => setHistoryCategory(event.target.value)}><option value="all">All categories</option>{categories.filter((item) => item.id !== 'all').map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select><select aria-label="Filter by skill" value={historySkill} onChange={(event) => setHistorySkill(event.target.value)}><option value="all">All skills</option>{skills.map((skill) => <option key={skill.id} value={skill.id}>{skill.name}</option>)}</select><select aria-label="Filter by date" value={historyPeriod} onChange={(event) => setHistoryPeriod(event.target.value)}><option value="all">Any date</option><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option></select>{sessions.length > 0 && <button className="icon-button destructive" onClick={() => void removeAllSessions()} aria-label="Delete all training history"><Trash2 size={16} /></button>}</div></div>
             {filteredHistory.length ? <div className="history-table panel"><div className="history-table-head"><span>SESSION</span><span>TECHNIQUE</span><span>REPS / HOLD</span><span>DATE</span><span /></div>
-              {filteredHistory.map((session) => <div className="history-table-row" key={session.id}><button className="history-session" onClick={() => openSession(session)}><span className="history-thumb"><Activity size={16} /></span><span><strong>{session.skillName}</strong><small>{getSkill(session.skillId)?.categoryName ?? 'Calisthenics'}</small></span></button><div className="history-score">{session.report.score === null ? <span className="score-muted">No score</span> : <><strong>{session.report.score}</strong><small>/100</small></>}</div><div className="history-stat">{session.report.validReps ? `${session.report.validReps} reps` : formatTime(session.report.longestHold)}</div><div className="history-date">{new Date(session.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</div><button className="icon-button" onClick={() => void removeSession(session.id)} aria-label={`Delete ${session.skillName} session`}><Trash2 size={15} /></button></div>)}
+              {filteredHistory.map((session) => <div className="history-table-row" key={session.id}><button className="history-session" onClick={() => openSession(session)}><span className="history-thumb"><Activity size={16} /></span><span><strong>{session.skillName}</strong><small>{getSkill(session.skillId)?.categoryName ?? 'Calisthenics'}</small></span></button><div className="history-score">{session.report.score === null ? <span className="score-muted">No score</span> : <><strong>{session.report.score}</strong><small>/100</small></>}</div><div className="history-stat">{session.report.validReps ? `${session.report.validReps} reps` : formatTime(session.report.longestHold)}</div><div className="history-date">{new Date(session.date).toLocaleDateString(locale, { month: 'short', day: 'numeric', year: 'numeric' })}</div><button className="icon-button" onClick={() => void removeSession(session.id)} aria-label={`Delete ${session.skillName} session`}><Trash2 size={15} /></button></div>)}
               </div> : <EmptyState title={sessions.length ? 'No sessions match these filters' : 'No sessions yet'} text={sessions.length ? 'Choose a wider date range or clear one of the filters.' : 'Choose a skill, record or upload a video, and save your first analysis.'} action={sessions.length ? 'Clear filters' : 'Choose a skill'} onClick={() => sessions.length ? (setHistorySkill('all'), setHistoryCategory('all'), setHistoryPeriod('all')) : setScreen('select')} />}
             <div className="storage-note"><ShieldCheck size={16} /><span>Local storage · {sessions.length} {sessions.length === 1 ? 'session' : 'sessions'} · Delete any session or clear all data at any time.</span></div>
           </section>
         )}
 
         <footer className="app-footer"><span>CALITRACKER <i>·</i> TRAIN SMARTER, STAY GROUNDED</span><span>BUILT FOR MOVEMENT <Activity size={13} /></span></footer>
+        </LocalizedContent>
       </main>
     </div>
   )
@@ -985,20 +1116,22 @@ function StatCard({ label, value, suffix, note, icon }: { label: string; value: 
   return <div className="stat-card panel"><div className="stat-top"><span>{label}</span><span className="stat-icon">{icon}</span></div><div className="stat-value">{value}<small>{suffix}</small></div><div className="stat-note">{note}</div></div>
 }
 
-function ScoreTrend({ sessions }: { sessions: TrainingSession[] }) {
+function ScoreTrend({ sessions, language }: { sessions: TrainingSession[]; language: Language }) {
+  const t = (value: string) => translate(value, language)
+  const locale = language === 'de' ? 'de-DE' : 'en-US'
   const scored = sessions.filter((session) => session.report.score !== null).slice(0, 8).reverse()
   const points = scored.map((session, index) => ({
     x: scored.length === 1 ? 160 : 10 + index * (300 / (scored.length - 1)),
     y: 67 - ((session.report.score ?? 0) / 100) * 55,
   }))
   return <div className="score-trend">
-    <div className="trend-heading"><span>TECHNIQUE SCORE TREND</span><strong>{scored[scored.length - 1]?.report.score} <small>latest</small></strong></div>
-    <svg viewBox="0 0 320 82" role="img" aria-label="Technique score trend across recent sessions">
+    <div className="trend-heading"><span>{t('TECHNIQUE SCORE TREND')}</span><strong>{scored[scored.length - 1]?.report.score} <small>{t('latest')}</small></strong></div>
+    <svg viewBox="0 0 320 82" role="img" aria-label={t('Technique score trend across recent sessions')}>
       <line x1="8" y1="12" x2="312" y2="12" /><line x1="8" y1="67" x2="312" y2="67" />
       <polyline points={points.map((point) => `${point.x},${point.y}`).join(' ')} />
       {points.map((point, index) => <circle key={scored[index].id} cx={point.x} cy={point.y} r="3.2"><title>{scored[index].skillName}: {scored[index].report.score}/100</title></circle>)}
     </svg>
-    <div className="trend-dates"><span>{new Date(scored[0].date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span><span>{scored.length} scored sessions</span><span>{new Date(scored[scored.length - 1].date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span></div>
+    <div className="trend-dates"><span>{new Date(scored[0].date).toLocaleDateString(locale, { month: 'short', day: 'numeric' })}</span><span>{t(`${scored.length} scored sessions`)}</span><span>{new Date(scored[scored.length - 1].date).toLocaleDateString(locale, { month: 'short', day: 'numeric' })}</span></div>
   </div>
 }
 
@@ -1006,17 +1139,43 @@ function EmptyState({ title, text, action, onClick }: { title: string; text: str
   return <div className="empty-state"><span className="empty-icon"><Activity size={20} /></span><strong>{title}</strong><p>{text}</p><button className="button-secondary" onClick={onClick}>{action} <ArrowRight size={15} /></button></div>
 }
 
-function SessionRow({ session, onClick }: { session: TrainingSession; onClick: () => void }) {
-  return <button className="session-row" onClick={onClick}><span className="session-row-icon"><Activity size={17} /></span><span className="session-row-main"><strong>{session.skillName}</strong><small>{new Date(session.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · {session.report.validReps ? `${session.report.validReps} reps` : `${formatTime(session.report.longestHold)} hold`}</small></span><span className={`session-score ${session.report.score === null ? 'score-muted' : ''}`}>{session.report.score ?? '—'}<small>{session.report.score !== null && '/100'}</small></span><ArrowRight className="session-arrow" size={16} /></button>
+function SessionRow({ session, language, onClick }: { session: TrainingSession; language: Language; onClick: () => void }) {
+  const locale = language === 'de' ? 'de-DE' : 'en-US'
+  const t = (value: string) => translate(value, language)
+  return <button className="session-row" onClick={onClick}><span className="session-row-icon"><Activity size={17} /></span><span className="session-row-main"><strong>{t(session.skillName)}</strong><small>{new Date(session.date).toLocaleDateString(locale, { month: 'short', day: 'numeric' })} · {session.report.validReps ? t(`${session.report.validReps} reps`) : `${formatTime(session.report.longestHold)} ${t('hold')}`}</small></span><span className={`session-score ${session.report.score === null ? 'score-muted' : ''}`}>{session.report.score ?? '—'}<small>{session.report.score !== null && '/100'}</small></span><ArrowRight className="session-arrow" size={16} /></button>
 }
 
-function SkillCard({ skill, onChoose }: { skill: Skill; onChoose: () => void }) {
+function SkillCard({ skill, language, favorite, onFavorite, onChoose }: { skill: Skill; language: Language; favorite: boolean; onFavorite: () => void; onChoose: () => void }) {
+  const t = (value: string) => translate(value, language)
   const difficulty = skill.level <= 2 ? 'Beginner' : skill.level === 3 ? 'Intermediate' : 'Advanced'
-  return <button className="skill-card panel" onClick={onChoose}><div className="skill-card-top"><span className={`skill-type ${skill.type}`}>{skill.type}</span><span className="level-label">{difficulty} · <b>Level {skill.level}</b></span></div><h3>{skill.name}</h3><p>{skill.description}</p><div className="skill-card-bottom"><span>{skill.categoryName}</span><span className="skill-select">Select <ArrowRight size={14} /></span></div></button>
+  return <article className="skill-card-wrap"><button className="skill-card panel" onClick={onChoose}><div className="skill-card-top"><span className={`skill-type ${skill.type}`}>{t(skill.type)}</span><span className="level-label">{t(difficulty)} · <b>{t('Level')} {skill.level}</b>{skill.difficultyTag && ` · ${t(skill.difficultyTag)}`}</span></div><h3>{skill.name}</h3><p>{skill.description}</p><div className="skill-card-bottom"><span>{skill.categoryName}</span><span className={`analysis-badge badge-${skill.analysisSupport}`}>{t(skill.analysisSupport === 'automatic' ? 'Auto' : skill.analysisSupport === 'partial' ? 'Partial' : 'Manual')}</span><span className="skill-select">{t('Details')} <ArrowRight size={14} /></span></div></button><button className={`skill-favorite ${favorite ? 'is-favorite' : ''}`} aria-label={t(favorite ? 'Remove from favorites' : 'Add to favorites')} onClick={onFavorite}>{favorite ? '★' : '☆'}</button></article>
 }
 
 function Metric({ label, value, helper, icon }: { label: string; value: string; helper: string; icon: ReactNode }) {
   return <div className="metric"><span className="metric-icon">{icon}</span><div><small>{label}</small><strong>{value}</strong><span>{helper}</span></div></div>
+}
+
+function LocalizedContent({ language, children }: { language: Language; children: ReactNode }) {
+  const localize = (node: ReactNode): ReactNode => {
+    if (typeof node === 'string') return translate(node, language)
+    if (Array.isArray(node)) return node.map(localize)
+    if (!isValidElement(node)) return node
+
+    const props = node.props as Record<string, unknown>
+    const nextProps: Record<string, unknown> = { ...props }
+    const componentElement = typeof node.type === 'function'
+    for (const [key, value] of Object.entries(props)) {
+      if (key === 'children') {
+        nextProps.children = Children.map(value as ReactNode, localize)
+      } else if (typeof value === 'string' && componentElement && !['id', 'className', 'type', 'name'].includes(key)) {
+        nextProps[key] = translate(value, language)
+      } else if (typeof value === 'string' && !componentElement && ['aria-label', 'placeholder', 'title'].includes(key)) {
+        nextProps[key] = translate(value, language)
+      }
+    }
+    return cloneElement(node, nextProps)
+  }
+  return <>{Children.map(children, localize)}</>
 }
 
 export default App

@@ -1,4 +1,5 @@
 import type { CategoryId, Skill } from '../types'
+import { extendedSkills } from './extendedSkills'
 
 const definitions: Array<{
   category: CategoryId
@@ -35,7 +36,7 @@ const definitions: Array<{
     category: 'handstand-push-up',
     categoryName: 'Handstand push-ups',
     entries: [
-      ['Pike Push-Ups', 1, 'dynamic', 'Lower the head between the hands and press back to straight arms.', 'Side view; include hands, head and hips.', ['Elbow bend', 'Consistent depth', 'Controlled press']],
+      ['Pike Push-Ups (Handstand Prep)', 1, 'dynamic', 'Lower the head between the hands and press back to straight arms.', 'Side view; include hands, head and hips.', ['Elbow bend', 'Consistent depth', 'Controlled press']],
       ['Elevated Pike Push-Ups', 2, 'dynamic', 'Press from an elevated pike while maintaining a stable shoulder position.', 'Side view; show elevation and full upper body.', ['Elbow tracking', 'Head reaches target depth', 'No bounce']],
       ['Wall Handstand Push-Ups', 3, 'dynamic', 'Descend and press vertically with the wall supporting balance.', 'Side view; camera perpendicular to wall.', ['Controlled descent', 'Consistent bottom position', 'Full press']],
       ['Deficit Handstand Push-Ups', 4, 'dynamic', 'Use the added range to reach a repeatable, controlled bottom position.', 'Side view; show blocks and head position.', ['Full range', 'Stable elbows', 'No uncontrolled drop']],
@@ -74,8 +75,8 @@ const definitions: Array<{
   },
 ]
 
-export const skills: Skill[] = definitions.flatMap(({ category, categoryName, entries }) =>
-  entries.map(([name, level, type, description, camera, checkpoints], index) => ({
+const existingSkills: Skill[] = definitions.flatMap(({ category, categoryName, entries }) => {
+  const categoryEntries = entries.map(([name, level, type, description, camera, checkpoints], index) => ({
     id: `${category}-${index + 1}`,
     name,
     category,
@@ -86,16 +87,61 @@ export const skills: Skill[] = definitions.flatMap(({ category, categoryName, en
     camera,
     checkpoints,
     cues: checkpoints,
-  })),
-)
+  }))
+  return categoryEntries.map((skill, index) => {
+    const easier = [...categoryEntries.slice(0, index)].reverse().find((candidate) => candidate.level < skill.level)
+    const harder = categoryEntries.slice(index + 1).find((candidate) => candidate.level > skill.level)
+    return {
+      ...skill,
+      analysisSupport: 'partial',
+      equipment: skill.category === 'front-lever' ? ['Bar', 'Rings']
+        : skill.category === 'handstand' || skill.category === 'handstand-push-up' ? ['Floor', 'Wall']
+          : ['Floor'],
+      prerequisites: easier ? [easier.name] : ['Comfortable, pain-free foundational strength and control'],
+      regressions: easier ? [easier.name] : ['Use a supported or reduced-range variation'],
+      progressions: harder ? [harder.name] : [],
+      commonErrors: ['Using momentum instead of controlled movement', 'Changing range or camera position between attempts'],
+      drills: easier ? [`Build control in ${easier.name}`] : ['Practice the entry, position and exit separately'],
+      safety: ['Use a clear practice area and stable support', 'Stop if you feel sharp pain or lose control'],
+      relatedSkillIds: [easier?.id, harder?.id].filter((id): id is string => Boolean(id)),
+    }
+  })
+})
 
-export const categories = [
+const skillKey = (skill: Skill) => `${skill.category}:${skill.name.toLowerCase()}`
+const knownSkillKeys = new Set(existingSkills.map(skillKey))
+const mergedSkills: Skill[] = [
+  ...existingSkills,
+  ...extendedSkills.filter((skill) => !knownSkillKeys.has(skillKey(skill))),
+]
+export const skills: Skill[] = mergedSkills.map((skill) => {
+  const related = mergedSkills.filter((candidate) => candidate.category === skill.category && candidate.id !== skill.id)
+  const easier = related.filter((candidate) => candidate.level < skill.level).sort((a, b) => b.level - a.level)[0]
+  const harder = related.filter((candidate) => candidate.level > skill.level).sort((a, b) => a.level - b.level)[0]
+  return {
+    ...skill,
+    regressions: easier ? [easier.name] : skill.regressions,
+    progressions: harder ? [harder.name] : skill.progressions,
+    relatedSkillIds: [easier?.id, harder?.id].filter((id): id is string => Boolean(id)),
+  }
+})
+
+export const categories: Array<{ id: CategoryId | 'all'; label: string }> = [
   { id: 'all', label: 'All skills' },
   { id: 'front-lever', label: 'Front lever' },
   { id: 'handstand', label: 'Handstand' },
   { id: 'handstand-push-up', label: 'HSPU' },
   { id: 'push-up', label: 'Push-ups' },
   { id: 'bent-arm-press', label: 'Bent-arm press' },
+  { id: 'back-lever', label: 'Back lever' },
+  { id: 'bar-skills', label: 'Bar skills' },
+  { id: 'planche', label: 'Planche' },
+  { id: 'core', label: 'L-sit, V-sit & core' },
+  { id: 'dips-bars', label: 'Dips & parallel bars' },
+  { id: 'human-flag', label: 'Human flag' },
+  { id: 'rings', label: 'Rings' },
+  { id: 'floorwork', label: 'Floorwork & transitions' },
+  { id: 'dynamic-skills', label: 'Skill information' },
 ] as const
 
 export const getSkill = (id: string) => skills.find((skill) => skill.id === id)

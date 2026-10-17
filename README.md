@@ -1,6 +1,6 @@
 # CaliTracker
 
-A mobile-first, client-side calisthenics skill analyzer built with React, TypeScript, Vite, MediaPipe Pose Landmarker, and IndexedDB. The skill library covers handstands, front levers, handstand push-up progressions, bent-arm presses, and push-up variations, with category, difficulty, and text filters.
+A mobile-first, client-side calisthenics skill analyzer built with React, TypeScript, Vite, MediaPipe Pose Landmarker, and IndexedDB. Its searchable skill library includes handstands, front and back levers, bar and ring skills, planche, core, dips, floorwork, and push-up variations, with category, difficulty, equipment, favorite, and text filters.
 
 ## Run locally
 
@@ -38,11 +38,23 @@ Pose detection uses actual MediaPipe landmarks. Separate front lever, handstand,
 
 These are coaching estimates, not a validated biomechanical assessment. A single 2D view cannot reliably measure depth, rotation, balance, or every 3D movement; camera angle, occlusion, lighting, clothing, and tracking confidence affect results. A score is withheld when pose evidence is insufficient. Counts and scores should be reviewed against the video, especially for skills whose movement is not well represented by the recommended camera view.
 
+## Skill library and progressions
+
+The extended library records prerequisites, easier and harder variations, related skills, common errors, suggested drills, equipment, and safety notes for each skill. Skill detail pages identify camera support as **partially analyzable** or **manual documentation only**. The manual-only entry lets athletes record their own repetitions and hold duration without producing a camera score. The current pose model does not independently identify exercise intent; advanced levers, rings, aerial skills, and many transitions are intentionally not camera-scored.
+
+Skill favorites and recently viewed skills are stored in browser local storage. Library filters include category, difficulty, equipment, and alphabetic or difficulty sorting.
+
 ## Handstand combo analyzer
 
 Choose **Edit combo** from the skill library to arrange press-to-handstand entries, handstand holds, and handstand push-ups. Set repetitions or hold time, add a short cue, and reorder the steps. Record with the existing camera or upload a local video; pose inference still runs locally using the existing MediaPipe model.
 
 The first combo analyzer estimates an inverted entry, a stable-looking interval, and HSPU elbow flexion/extension cycles. It does not claim to identify exercise intent, a controlled press, balance, contact, or exact movement depth. Every timeline segment is initially unconfirmed; review it against the video, adjust its start/end time, and explicitly confirm it. Corrections are saved with the session in this browser. The sequence order and rep count are coaching estimates, not validated recognition.
+
+## Combo library and builder
+
+The combo library contains handstand, bar, push-up, planche, ring, and mixed example sequences with difficulty, descriptions, and prerequisites. Templates can be loaded into the editable builder. Custom combos support skill selection, repetitions, hold time, rest, transition cues, notes, reordering, renaming, duplication, deletion, comparison with a reference, and local persistence. Transferring a combo to Freestyle adds only a reference label: freestyle analysis does not enforce the planned order or claim to recognize unsupported transitions.
+
+Custom combos, favorites, and recently viewed skill IDs use browser local storage; analysis sessions and videos remain in IndexedDB.
 
 ## Freestyle mode
 
@@ -52,7 +64,9 @@ The current automatic classifier deliberately reports only broad 2D patterns: in
 
 ## Project structure
 
-- `src/data/skills.ts` — skill library and progression metadata.
+- `src/data/skills.ts` / `src/data/extendedSkills.ts` — categorized skill library and progression metadata.
+- `src/data/combos.ts` — combo templates and their ordered skill steps.
+- `src/components/ComboLibrary.tsx` — searchable templates and locally saved custom combo builder.
 - `src/lib/pose.ts` — lazy MediaPipe model loading and frame inference.
 - `src/lib/analyzers/` — category-specific 2D pose feature analyzers and shared landmark math.
 - `src/lib/analyzer.ts` — hold tracking, movement-phase counters, and confidence-aware weighted report scoring.

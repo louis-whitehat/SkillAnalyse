@@ -1,5 +1,9 @@
-export type CategoryId = 'front-lever' | 'handstand' | 'handstand-push-up' | 'push-up' | 'bent-arm-press'
-export type SkillType = 'static' | 'dynamic' | 'combined'
+export type CategoryId =
+  | 'front-lever' | 'handstand' | 'handstand-push-up' | 'push-up' | 'bent-arm-press'
+  | 'back-lever' | 'bar-skills' | 'planche' | 'core' | 'dips-bars'
+  | 'human-flag' | 'rings' | 'freestyle' | 'floorwork' | 'dynamic-skills'
+export type SkillType = 'static' | 'dynamic' | 'combined' | 'transition' | 'information'
+export type AnalysisSupport = 'automatic' | 'partial' | 'manual'
 
 export interface Skill {
   id: string
@@ -12,6 +16,16 @@ export interface Skill {
   checkpoints: string[]
   camera: string
   cues: string[]
+  analysisSupport: AnalysisSupport
+  equipment: string[]
+  prerequisites: string[]
+  regressions: string[]
+  progressions: string[]
+  commonErrors: string[]
+  drills: string[]
+  safety: string[]
+  relatedSkillIds: string[]
+  difficultyTag?: 'Extreme'
 }
 
 export interface Criterion {
