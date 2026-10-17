@@ -38,12 +38,26 @@ Pose detection uses actual MediaPipe landmarks. Separate front lever, handstand,
 
 These are coaching estimates, not a validated biomechanical assessment. A single 2D view cannot reliably measure depth, rotation, balance, or every 3D movement; camera angle, occlusion, lighting, clothing, and tracking confidence affect results. A score is withheld when pose evidence is insufficient. Counts and scores should be reviewed against the video, especially for skills whose movement is not well represented by the recommended camera view.
 
+## Handstand combo analyzer
+
+Choose **Edit combo** from the skill library to arrange press-to-handstand entries, handstand holds, and handstand push-ups. Set repetitions or hold time, add a short cue, and reorder the steps. Record with the existing camera or upload a local video; pose inference still runs locally using the existing MediaPipe model.
+
+The first combo analyzer estimates an inverted entry, a stable-looking interval, and HSPU elbow flexion/extension cycles. It does not claim to identify exercise intent, a controlled press, balance, contact, or exact movement depth. Every timeline segment is initially unconfirmed; review it against the video, adjust its start/end time, and explicitly confirm it. Corrections are saved with the session in this browser. The sequence order and rep count are coaching estimates, not validated recognition.
+
+## Freestyle mode
+
+Use **Freestyle** from the navigation, dashboard, or top bar to record without selecting an exercise. It reuses the existing camera, MediaPipe Pose Landmarker and local IndexedDB session storage. During a recording you can pause, resume or stop; the report includes detected intervals, pose visibility, approximate repetition/hold measurements and an editable timeline that seeks the saved video. Manual label, timing, count and confirmation edits are stored locally with the session.
+
+The current automatic classifier deliberately reports only broad 2D patterns: inverted handstand-like holds and visible elbow cycles, horizontal front-lever-like positions, push-up-like positions/cycles, and sufficiently mobile but unsupported intervals as **Unclassified movement**. A rep is marked higher confidence only when the broad pattern is sustained and landmark visibility is strong; this does not validate form or identify an exercise variation. Hold intervals use pose geometry and are not proof of balance. Press-to-handstand intent and straddle/one-leg variants are not automatically distinguished. Diamond, wide, archer, incline/decline and other push-up variations cannot be distinguished reliably. Pull-ups and muscle-ups lack reliable equipment/contact cues in the current pose model, so they remain unclassified unless the user corrects the segment manually. Poorly visible recordings report insufficient evidence instead of fabricating a skill or overall score.
+
 ## Project structure
 
 - `src/data/skills.ts` — skill library and progression metadata.
 - `src/lib/pose.ts` — lazy MediaPipe model loading and frame inference.
 - `src/lib/analyzers/` — category-specific 2D pose feature analyzers and shared landmark math.
 - `src/lib/analyzer.ts` — hold tracking, movement-phase counters, and confidence-aware weighted report scoring.
+- `src/lib/comboAnalyzer.ts` — estimated handstand combo phases and editable timeline data.
+- `src/lib/freestyleAnalyzer.ts` — temporal broad-pose-pattern segmentation, confidence handling, and estimated freestyle reps/holds.
 - `src/lib/storage.ts` — IndexedDB session and video persistence.
 - `src/App.tsx` / `src/App.css` — responsive dashboard and analysis workflow.
 

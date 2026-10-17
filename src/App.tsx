@@ -9,9 +9,11 @@ import type { PoseLandmarker } from '@mediapipe/tasks-vision'
 import { useRegisterSW } from 'virtual:pwa-register/react'
 import { categories, getSkill, skills } from './data/skills'
 import { formatTime, SkillAnalyzer } from './lib/analyzer'
+import { ComboAnalyzer } from './lib/comboAnalyzer'
+import { FreestyleAnalyzer } from './lib/freestyleAnalyzer'
 import { detectPose, loadPoseLandmarker } from './lib/pose'
 import { clearSessions, deleteSession, listSessions, saveSession } from './lib/storage'
-import type { AnalysisReport, LiveMetrics, PosePoint, Skill, TrainingSession } from './types'
+import type { AnalysisReport, ComboStep, ComboStepKind, FreestyleSegment, FreestyleSkillKind, LiveMetrics, PosePoint, Skill, TrainingSession } from './types'
 import './App.css'
 
 type Screen = 'home' | 'select' | 'session' | 'report' | 'history'
@@ -39,9 +41,27 @@ const errorMessage = (reason: unknown) => reason instanceof Error ? reason.messa
 const navItems = [
   { id: 'home' as const, label: 'Overview', icon: Activity },
   { id: 'select' as const, label: 'Analyze skill', icon: Plus },
+  { id: 'freestyle' as const, label: 'Freestyle', icon: Sparkles },
   { id: 'history' as const, label: 'Training log', icon: History },
 ]
 const skeletonLinks = [[11, 12], [11, 13], [13, 15], [12, 14], [14, 16], [11, 23], [12, 24], [23, 24], [23, 25], [25, 27], [24, 26], [26, 28]]
+const initialComboSteps: ComboStep[] = [
+  { id: 'combo-press', kind: 'press', name: 'Press to handstand', repetitions: 1, holdSeconds: 0, description: '' },
+  { id: 'combo-hold', kind: 'hold', name: 'Handstand hold', repetitions: 1, holdSeconds: 5, description: '' },
+  { id: 'combo-hspu', kind: 'hspu', name: 'Handstand Push-ups', repetitions: 2, holdSeconds: 0, description: '' },
+]
+const comboKindNames: Record<ComboStepKind, string> = { press: 'Press-to-handstand', hold: 'Handstand hold', hspu: 'Handstand push-ups' }
+const freestyleLabels: Array<{ kind: FreestyleSkillKind; label: string }> = [
+  { kind: 'handstand', label: 'Handstand hold' },
+  { kind: 'handstand-push-up', label: 'Handstand Push-up pattern' },
+  { kind: 'front-lever', label: 'Front-lever pattern' },
+  { kind: 'front-lever-raise', label: 'Front-lever raise (manual)' },
+  { kind: 'push-up', label: 'Push-up pattern' },
+  { kind: 'press-to-handstand', label: 'Press-to-handstand (manual)' },
+  { kind: 'pull-up', label: 'Pull-up (manual)' },
+  { kind: 'muscle-up', label: 'Muscle-up (manual)' },
+  { kind: 'unknown', label: 'Unclassified / unknown' },
+]
 
 function App() {
   const [screen, setScreen] = useState<Screen>('home')
@@ -49,6 +69,10 @@ function App() {
   const [category, setCategory] = useState<string>('all')
   const [difficulty, setDifficulty] = useState('all')
   const [query, setQuery] = useState('')
+  const [comboEditorOpen, setComboEditorOpen] = useState(false)
+  const [comboMode, setComboMode] = useState(false)
+  const [comboSteps, setComboSteps] = useState<ComboStep[]>(initialComboSteps)
+  const [freestyleMode, setFreestyleMode] = useState(false)
   const [targetReps, setTargetReps] = useState(5)
   const [targetHold, setTargetHold] = useState(20)
   const [measureHold, setMeasureHold] = useState(true)
@@ -77,6 +101,8 @@ function App() {
   const [mediaMode, setMediaMode] = useState<MediaMode>('camera')
   const [uploadedVideo, setUploadedVideo] = useState<Blob | null>(null)
   const [analysisRunning, setAnalysisRunning] = useState(false)
+  const [selectedTimelineStep, setSelectedTimelineStep] = useState<string | null>(null)
+  const [selectedFreestyleSegment, setSelectedFreestyleSegment] = useState<string | null>(null)
   const [historySkill, setHistorySkill] = useState('all')
   const [historyCategory, setHistoryCategory] = useState('all')
   const [historyPeriod, setHistoryPeriod] = useState('all')
@@ -90,12 +116,17 @@ function App() {
   const streamRef = useRef<MediaStream | null>(null)
   const landmarkerRef = useRef<PoseLandmarker | null>(null)
   const analyzerRef = useRef<SkillAnalyzer | null>(null)
+  const comboAnalyzerRef = useRef<ComboAnalyzer | null>(null)
+  const freestyleAnalyzerRef = useRef<FreestyleAnalyzer | null>(null)
+  const reportVideoRef = useRef<HTMLVideoElement>(null)
   const analysisSetupRef = useRef(false)
   const rafRef = useRef<number | null>(null)
   const lastVideoTimeRef = useRef(-1)
   const pausedRef = useRef(false)
   const countdownTimerRef = useRef<number | null>(null)
   const startedAtRef = useRef(0)
+  const pausedAtRef = useRef<number | null>(null)
+  const pausedDurationRef = useRef(0)
 
   const {
     needRefresh: [needRefresh, setNeedRefresh],
@@ -175,6 +206,9 @@ function App() {
 
   const chooseSkill = (skill: Skill) => {
     setSelectedSkill(skill)
+    setFreestyleMode(false)
+    setComboMode(false)
+    setComboEditorOpen(false)
     setMeasureHold(skill.type !== 'dynamic')
     setScreen('session')
     setError('')
@@ -272,13 +306,17 @@ function App() {
     setAnalysisRunning(true)
     const tick = () => {
       rafRef.current = requestAnimationFrame(tick)
-      if (pausedRef.current || !landmarkerRef.current || !analyzerRef.current || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return
+      if (pausedRef.current || !landmarkerRef.current || (!analyzerRef.current && !freestyleAnalyzerRef.current) || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return
       if (video.currentTime === lastVideoTimeRef.current) return
       lastVideoTimeRef.current = video.currentTime
       try {
         const points = detectPose(landmarkerRef.current, video)
         setLandmarks(points)
-        setMetrics(analyzerRef.current.consume(points, time()))
+        setMetrics(freestyleAnalyzerRef.current
+          ? freestyleAnalyzerRef.current.consume(points, time())
+          : comboAnalyzerRef.current
+            ? comboAnalyzerRef.current.consume(points, time())
+            : analyzerRef.current?.consume(points, time()) ?? initialMetrics)
       } catch (reason) {
         console.error('Pose inference failed.', reason)
         setError('Pose analysis stopped unexpectedly. You can still save this session without a technique score.')
@@ -289,14 +327,18 @@ function App() {
   }
 
   const createAndSaveSession = async (video?: Blob) => {
-    const report = analyzerRef.current?.report() ?? emptyReport()
+    const freestyle = freestyleAnalyzerRef.current?.analysis()
+    const report = freestyleAnalyzerRef.current?.report() ?? comboAnalyzerRef.current?.report() ?? analyzerRef.current?.report() ?? emptyReport()
+    const combo = comboAnalyzerRef.current?.comboReport()
     const session: TrainingSession = {
       id: crypto.randomUUID(),
       date: new Date().toISOString(),
-      skillId: selectedSkill?.id ?? '',
-      skillName: selectedSkill?.name ?? 'Unknown skill',
+      skillId: freestyle ? '' : selectedSkill?.id ?? '',
+      skillName: freestyle ? 'Freestyle' : combo ? 'Handstand Combo' : selectedSkill?.name ?? 'Unknown skill',
       category: selectedSkill?.category ?? 'handstand',
       report,
+      ...(combo ? { combo } : {}),
+      ...(freestyle ? { freestyle } : {}),
       settings: { targetReps, measureHold, targetHold, focus, positionTolerance, smoothingStrength },
       ...(video ? { video } : {}),
     }
@@ -319,8 +361,8 @@ function App() {
 
   const beginRecording = async () => {
     if (analysisSetupRef.current) return
-    if (!selectedSkill || !cameraRef.current || !cameraActive) {
-      setError('Select a skill and start the camera before recording.')
+    if ((!selectedSkill && !freestyleMode) || !cameraRef.current || !cameraActive) {
+      setError('Start the camera before recording.')
       return
     }
     analysisSetupRef.current = true
@@ -329,7 +371,9 @@ function App() {
     setLoadingMessage('Preparing pose analysis…')
     try {
       await ensurePoseModel()
-      analyzerRef.current = new SkillAnalyzer(selectedSkill, { targetReps, measureHold, targetHold, focus, positionTolerance, smoothingStrength })
+      analyzerRef.current = selectedSkill ? new SkillAnalyzer(selectedSkill, { targetReps, measureHold, targetHold, focus, positionTolerance, smoothingStrength }) : null
+      comboAnalyzerRef.current = comboMode ? new ComboAnalyzer(comboSteps) : null
+      freestyleAnalyzerRef.current = freestyleMode ? new FreestyleAnalyzer() : null
       setMetrics(initialMetrics)
       setElapsed(0)
       setLandmarks(null)
@@ -371,7 +415,12 @@ function App() {
             setRecording(true)
           }
           startedAtRef.current = performance.now()
-          inferenceLoop(cameraRef.current, () => (performance.now() - startedAtRef.current) / 1000)
+          pausedAtRef.current = null
+          pausedDurationRef.current = 0
+          inferenceLoop(cameraRef.current, () => {
+            const currentPause = pausedAtRef.current === null ? 0 : performance.now() - pausedAtRef.current
+            return (performance.now() - startedAtRef.current - pausedDurationRef.current - currentPause) / 1000
+          })
         }
       }, 1000)
     } catch (reason) {
@@ -388,6 +437,7 @@ function App() {
   const pauseRecording = () => {
     try {
       if (recorderRef.current?.state === 'recording') recorderRef.current.pause()
+      pausedAtRef.current = performance.now()
       setPaused(true)
     } catch (reason) {
       console.error('Could not pause recording.', reason)
@@ -398,6 +448,8 @@ function App() {
   const resumeRecording = () => {
     try {
       if (recorderRef.current?.state === 'paused') recorderRef.current.resume()
+      if (pausedAtRef.current !== null) pausedDurationRef.current += performance.now() - pausedAtRef.current
+      pausedAtRef.current = null
       setPaused(false)
     } catch (reason) {
       console.error('Could not resume recording.', reason)
@@ -425,19 +477,23 @@ function App() {
     setPoseVideoSize({ width: 0, height: 0 })
     setMetrics(initialMetrics)
     analyzerRef.current = null
+    comboAnalyzerRef.current = null
+    freestyleAnalyzerRef.current = null
   }
 
   const analyzeUploadedVideo = async () => {
     if (analysisSetupRef.current) return
     const video = uploadRef.current
-    if (!selectedSkill || !video || !uploadedVideo) return
+    if ((!selectedSkill && !freestyleMode) || !video || !uploadedVideo) return
     analysisSetupRef.current = true
     setError('')
     setLoading(true)
     setLoadingMessage('Preparing local pose analysis…')
     try {
       await ensurePoseModel()
-      analyzerRef.current = new SkillAnalyzer(selectedSkill, { targetReps, measureHold, targetHold, focus, positionTolerance, smoothingStrength })
+      analyzerRef.current = selectedSkill ? new SkillAnalyzer(selectedSkill, { targetReps, measureHold, targetHold, focus, positionTolerance, smoothingStrength }) : null
+      comboAnalyzerRef.current = comboMode ? new ComboAnalyzer(comboSteps) : null
+      freestyleAnalyzerRef.current = freestyleMode ? new FreestyleAnalyzer() : null
       setMetrics(initialMetrics)
       setLandmarks(null)
       await video.play()
@@ -453,7 +509,7 @@ function App() {
   }
 
   const finishUploadedAnalysis = () => {
-    if (!analyzerRef.current) return
+    if (!analyzerRef.current && !freestyleAnalyzerRef.current && !comboAnalyzerRef.current) return
     stopInference()
     void createAndSaveSession(uploadedVideo ?? undefined)
   }
@@ -487,6 +543,9 @@ function App() {
     stopInference()
     stopCamera()
     setSelectedSkill(null)
+    setFreestyleMode(false)
+    setComboMode(false)
+    setComboEditorOpen(false)
     setActiveSession(null)
     setUploadedVideo(null)
     setScreen('select')
@@ -498,17 +557,159 @@ function App() {
     setScreen('report')
   }
 
+  const startComboAnalysis = () => {
+    if (!comboSteps.length) return
+    const handstandSkill = skills.find((skill) => skill.name === 'Handstand')
+    if (!handstandSkill) {
+      setError('The handstand analyzer is not available in the skill library.')
+      return
+    }
+    setSelectedSkill(handstandSkill)
+    setFreestyleMode(false)
+    setComboMode(true)
+    setComboEditorOpen(false)
+    setUploadedVideo(null)
+    setMediaMode('camera')
+    setScreen('session')
+  }
+
+  const startFreestyle = () => {
+    if (recording || analysisRunning || countdown > 0 || loading) {
+      setError('Finish or stop the active analysis before starting Freestyle.')
+      return
+    }
+    const baseSkill = skills.find((skill) => skill.name === 'Handstand')
+    if (!baseSkill) {
+      setError('The local pose analyzer is not available.')
+      return
+    }
+    setSelectedSkill(baseSkill)
+    setFreestyleMode(true)
+    setComboMode(false)
+    setUploadedVideo(null)
+    setMediaMode('camera')
+    setMetrics(initialMetrics)
+    setError('')
+    setScreen('session')
+  }
+
+  const updateComboSegment = (stepId: string, changes: Partial<NonNullable<TrainingSession['combo']>['segments'][number]>) => {
+    if (!activeSession?.combo) return
+    const updated: TrainingSession = {
+      ...activeSession,
+      combo: {
+        ...activeSession.combo,
+        segments: activeSession.combo.segments.map((segment) => segment.stepId === stepId ? { ...segment, ...changes } : segment),
+      },
+    }
+    setActiveSession(updated)
+    setSessions((previous) => previous.map((session) => session.id === updated.id ? updated : session))
+    void saveSession(updated).catch((reason: unknown) => {
+      console.error('Could not save corrected combo timeline.', reason)
+      setError('The timeline correction is visible but could not be saved to local storage.')
+    })
+  }
+
+  const updateFreestyleSegment = (segmentId: string, changes: Partial<FreestyleSegment>) => {
+    if (!activeSession?.freestyle) return
+    const segments = activeSession.freestyle.segments.map((segment) => {
+      if (segment.id !== segmentId) return segment
+      const updated = { ...segment, ...changes }
+      if (updated.kind === 'unknown') return { ...updated, repetitions: 0, partialRepetitions: 0, holdSeconds: 0, status: 'unclear' as const }
+      const staticKind = updated.kind === 'handstand' || updated.kind === 'front-lever'
+      return staticKind && (changes.kind !== undefined || changes.start !== undefined || changes.end !== undefined)
+        ? { ...updated, holdSeconds: Math.max(0, updated.end - updated.start) }
+        : updated
+    }).sort((left, right) => left.start - right.start)
+    const totalHold = segments.reduce((sum, segment) => sum + segment.holdSeconds, 0)
+    const longestHold = segments.reduce((longest, segment) => Math.max(longest, segment.holdSeconds), 0)
+    const repetitions = segments.reduce((sum, segment) => sum + segment.repetitions, 0)
+    const partialRepetitions = segments.reduce((sum, segment) => sum + segment.partialRepetitions, 0)
+    const reliableRepetitions = segments.reduce((sum, segment) => sum + (segment.status === 'reliable' ? segment.repetitions : 0), 0)
+    const updated: TrainingSession = {
+      ...activeSession,
+      freestyle: {
+        ...activeSession.freestyle,
+        segments,
+        reliableRepetitions,
+      },
+      report: { ...activeSession.report, totalHold, longestHold, validReps: repetitions, partialReps: partialRepetitions },
+    }
+    setActiveSession(updated)
+    setSessions((previous) => previous.map((session) => session.id === updated.id ? updated : session))
+    void saveSession(updated).catch((reason: unknown) => {
+      console.error('Could not save corrected freestyle timeline.', reason)
+      setError('The timeline correction is visible but could not be saved to local storage.')
+    })
+  }
+
+  const addFreestyleSegment = () => {
+    if (!activeSession?.freestyle) return
+    const start = 0
+    const end = Math.min(activeSession.freestyle.duration, 1)
+    const segment: FreestyleSegment = {
+      id: crypto.randomUUID(),
+      kind: 'unknown',
+      name: 'Unclassified / unknown',
+      start,
+      end,
+      repetitions: 0,
+      partialRepetitions: 0,
+      holdSeconds: 0,
+      confidence: 0,
+      status: 'unclear',
+      alignment: null,
+      feedback: 'Added manually. Review the recording and assign the correct label and boundaries.',
+      confirmed: false,
+    }
+    const updated: TrainingSession = {
+      ...activeSession,
+      freestyle: { ...activeSession.freestyle, segments: [...activeSession.freestyle.segments, segment].sort((left, right) => left.start - right.start) },
+    }
+    setActiveSession(updated)
+    setSessions((previous) => previous.map((session) => session.id === updated.id ? updated : session))
+    setSelectedFreestyleSegment(segment.id)
+    if (reportVideoRef.current) reportVideoRef.current.currentTime = start
+    void saveSession(updated).catch((reason: unknown) => {
+      console.error('Could not save manually added freestyle interval.', reason)
+      setError('The new interval is visible but could not be saved to local storage.')
+    })
+  }
+
+  const removeFreestyleSegment = (segmentId: string) => {
+    if (!activeSession?.freestyle) return
+    const segments = activeSession.freestyle.segments.filter((segment) => segment.id !== segmentId)
+    const totalHold = segments.reduce((sum, segment) => sum + segment.holdSeconds, 0)
+    const longestHold = segments.reduce((longest, segment) => Math.max(longest, segment.holdSeconds), 0)
+    const validReps = segments.reduce((sum, segment) => sum + segment.repetitions, 0)
+    const partialReps = segments.reduce((sum, segment) => sum + segment.partialRepetitions, 0)
+    const reliableRepetitions = segments.reduce((sum, segment) => sum + (segment.status === 'reliable' ? segment.repetitions : 0), 0)
+    const updated: TrainingSession = {
+      ...activeSession,
+      freestyle: { ...activeSession.freestyle, segments, reliableRepetitions },
+      report: { ...activeSession.report, totalHold, longestHold, validReps, partialReps },
+    }
+    setActiveSession(updated)
+    setSessions((previous) => previous.map((session) => session.id === updated.id ? updated : session))
+    if (selectedFreestyleSegment === segmentId) setSelectedFreestyleSegment(null)
+    void saveSession(updated).catch((reason: unknown) => {
+      console.error('Could not save removed freestyle interval.', reason)
+      setError('The interval was removed from this view but could not be saved to local storage.')
+    })
+  }
+
   const sessionVideo = activeSession?.video
   const videoUrl = useMemo(() => sessionVideo ? URL.createObjectURL(sessionVideo) : '', [sessionVideo])
   useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl) }, [videoUrl])
   const poseVideoWidth = poseVideoSize.width || 1
   const poseVideoHeight = poseVideoSize.height || 1
   const activeSkill = activeSession ? getSkill(activeSession.skillId) : undefined
+  const activeFreestyle = activeSession?.freestyle
   const reportLimitations = activeSession
     ? activeSession.report.limitations ?? ['This saved report predates detailed measurement limits. Treat 2D pose scores as estimates, not verified exercise recognition.']
     : []
   const recentSkillSessions = activeSession
-    ? sessions.filter((session) => session.skillId === activeSession.skillId && session.id !== activeSession.id).slice(0, 3)
+    ? sessions.filter((session) => !session.combo && !session.freestyle && session.skillId === activeSession.skillId && session.id !== activeSession.id).slice(0, 3)
     : []
 
   return (
@@ -521,7 +722,7 @@ function App() {
         <div className="sidebar-label">WORKSPACE</div>
         <nav className="side-nav" aria-label="Main navigation">
           {navItems.map(({ id, label, icon: Icon }) => (
-            <button key={id} className={`nav-item ${screen === id ? 'active' : ''}`} onClick={() => navigateTo(id)}>
+            <button key={id} className={`nav-item ${(id === 'freestyle' ? screen === 'session' && freestyleMode || screen === 'report' && Boolean(activeSession?.freestyle) : screen === id) ? 'active' : ''}`} onClick={() => id === 'freestyle' ? startFreestyle() : navigateTo(id)}>
               <Icon size={18} /><span>{label}</span>
               {id === 'history' && sessions.length > 0 && <span className="nav-count">{sessions.length}</span>}
             </button>
@@ -538,10 +739,11 @@ function App() {
 
       <main className="main-area">
         <header className="topbar">
-          <div className="breadcrumb"><span>TRAINING</span><span className="crumb-slash">/</span><strong>{screen === 'home' ? 'Overview' : screen === 'select' ? 'Skill library' : screen === 'session' ? 'New analysis' : screen === 'report' ? 'Session report' : 'Training log'}</strong></div>
+          <div className="breadcrumb"><span>TRAINING</span><span className="crumb-slash">/</span><strong>{freestyleMode && screen === 'session' ? 'Freestyle' : screen === 'home' ? 'Overview' : screen === 'select' ? 'Skill library' : screen === 'session' ? 'New analysis' : screen === 'report' ? 'Session report' : 'Training log'}</strong></div>
           <div className="topbar-actions">
             {!appInstalled && <button className="topbar-cta install-action" onClick={() => void installApp()} aria-label={installPrompt ? 'Install CaliTracker' : 'Show installation instructions'}><Download size={15} /><span>{installPrompt ? 'Install app' : 'Install'}</span></button>}
-            <button className="topbar-cta" onClick={() => { setError(''); navigateTo('select') }}><Plus size={16} /> New analysis</button>
+            <button className="topbar-cta" onClick={() => { setError(''); navigateTo('select') }} aria-label="New skill analysis" title="New analysis"><Plus size={16} /><span>New analysis</span></button>
+            <button className="topbar-cta" onClick={startFreestyle} aria-label="Start Freestyle" title="Freestyle"><Sparkles size={15} /><span>Freestyle</span></button>
           </div>
         </header>
 
@@ -555,7 +757,7 @@ function App() {
           <section className="page-content">
             <div className="welcome-row">
               <div><div className="eyebrow"><span className="live-dot" /> YOUR PERSONAL MOVEMENT LAB</div><h1>Train with <em>intention.</em></h1><p className="lede">Build strength skill by skill. Your progress, measured on your terms.</p></div>
-              <button className="button-primary welcome-action" onClick={() => setScreen('select')}><Plus size={18} /> Start a session <ArrowRight size={16} /></button>
+              <div className="welcome-actions"><button className="button-primary welcome-action" onClick={() => setScreen('select')}><Plus size={18} /> Start a session <ArrowRight size={16} /></button><button className="button-secondary welcome-action" onClick={startFreestyle}><Sparkles size={17} /> Freestyle</button></div>
             </div>
             <div className="stat-grid">
               <StatCard label="Sessions logged" value={String(sessions.length).padStart(2, '0')} note="On this device" icon={<Dumbbell size={18} />} />
@@ -586,6 +788,40 @@ function App() {
         {screen === 'select' && (
           <section className="page-content">
             <div className="page-heading"><div><div className="eyebrow">BUILD YOUR SESSION</div><h1>Choose your <em>skill.</em></h1><p className="lede">Select a specific progression before recording. Each skill has its own movement checks.</p></div></div>
+            <section className="combo-builder panel">
+              <div className="panel-heading"><div><div className="eyebrow">HANDSTAND COMBO ANALYZER</div><h2>Build a flowing sequence</h2></div><button className="button-secondary" onClick={() => setComboEditorOpen((open) => !open)}>{comboEditorOpen ? 'Close editor' : 'Edit combo'}</button></div>
+              <p className="combo-intro">Arrange press entries, handstand holds and handstand push-ups. Pose-based transitions are estimates and can be reviewed after recording.</p>
+              {comboEditorOpen && <div className="combo-step-list">
+                {comboSteps.map((step, index) => {
+                  const options = skills.filter((skill) => step.kind === 'press'
+                    ? skill.category === 'bent-arm-press' || skill.name === 'Handstand Kick-Up'
+                    : step.kind === 'hold'
+                      ? skill.category === 'handstand' && skill.type !== 'dynamic'
+                      : skill.category === 'handstand-push-up')
+                  return <div className="combo-step-editor panel" key={step.id}>
+                    <div className="combo-step-number">{String(index + 1).padStart(2, '0')}</div>
+                    <div className="combo-step-fields">
+                      <label>Element<select value={step.name} onChange={(event) => setComboSteps((previous) => previous.map((item) => item.id === step.id ? { ...item, name: event.target.value } : item))}>
+                        <option value={step.name}>{step.name}</option>
+                        {options.filter((option) => option.name !== step.name).map((option) => <option key={option.id} value={option.name}>{option.name}</option>)}
+                      </select></label>
+                      <label>Type<select value={step.kind} onChange={(event) => {
+                        const kind = event.target.value as ComboStepKind
+                        setComboSteps((previous) => previous.map((item) => item.id === step.id ? {
+                          ...item, kind, name: kind === 'press' ? 'Press to handstand' : kind === 'hold' ? 'Handstand hold' : 'Handstand Push-ups',
+                        } : item))
+                      }}><option value="press">Press to handstand</option><option value="hold">Handstand hold</option><option value="hspu">Handstand push-ups</option></select></label>
+                      <label>Reps<input aria-label={`Repetitions for step ${index + 1}`} type="number" min="1" max="50" value={step.repetitions} onChange={(event) => setComboSteps((previous) => previous.map((item) => item.id === step.id ? { ...item, repetitions: Math.max(1, Math.min(50, Number(event.target.value) || 1)) } : item))} /></label>
+                      <label>Hold (sec)<input aria-label={`Hold time for step ${index + 1}`} type="number" min="0" max="300" value={step.holdSeconds} onChange={(event) => setComboSteps((previous) => previous.map((item) => item.id === step.id ? { ...item, holdSeconds: Math.max(0, Math.min(300, Number(event.target.value) || 0)) } : item))} /></label>
+                      <label className="combo-description">Description (optional)<input value={step.description} maxLength={120} placeholder="Short cue for this element" onChange={(event) => setComboSteps((previous) => previous.map((item) => item.id === step.id ? { ...item, description: event.target.value } : item))} /></label>
+                    </div>
+                    <div className="combo-step-actions"><button className="icon-button" aria-label={`Move step ${index + 1} up`} disabled={index === 0} onClick={() => setComboSteps((previous) => { const next = [...previous]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; return next })}>↑</button><button className="icon-button" aria-label={`Move step ${index + 1} down`} disabled={index === comboSteps.length - 1} onClick={() => setComboSteps((previous) => { const next = [...previous]; [next[index + 1], next[index]] = [next[index], next[index + 1]]; return next })}>↓</button><button className="icon-button" aria-label={`Remove step ${index + 1}`} disabled={comboSteps.length <= 1} onClick={() => setComboSteps((previous) => previous.filter((item) => item.id !== step.id))}><X size={15} /></button></div>
+                  </div>
+                })}
+                <div className="combo-editor-footer"><button className="button-secondary" onClick={() => setComboSteps((previous) => [...previous, { id: crypto.randomUUID(), kind: 'hold', name: 'Handstand hold', repetitions: 1, holdSeconds: 5, description: '' }])}><Plus size={15} /> Add element</button><button className="button-primary" onClick={startComboAnalysis} disabled={comboSteps.length === 0}><Activity size={15} /> Analyze this combo</button></div>
+              </div>}
+              {!comboEditorOpen && <div className="combo-preview">{comboSteps.map((step, index) => <span key={step.id}><b>{index + 1}</b>{step.name} · {step.repetitions} rep{step.repetitions === 1 ? '' : 's'}{step.holdSeconds > 0 ? ` · ${step.holdSeconds}s` : ''}</span>)}</div>}
+            </section>
             <div className="library-tools"><label className="search-field"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search skills…" aria-label="Search skills" />{query && <button onClick={() => setQuery('')} aria-label="Clear search"><X size={15} /></button>}</label>
               <label className="difficulty-filter"><span>DIFFICULTY</span><select aria-label="Filter by difficulty" value={difficulty} onChange={(event) => setDifficulty(event.target.value)}><option value="all">All levels</option><option value="beginner">Beginner · 1–2</option><option value="intermediate">Intermediate · 3</option><option value="advanced">Advanced · 4–5</option></select></label>
               <div className="category-pills">{categories.map((item) => <button key={item.id} className={category === item.id ? 'selected' : ''} onClick={() => setCategory(item.id)}>{item.label}</button>)}</div>
@@ -603,7 +839,7 @@ function App() {
 
         {screen === 'session' && selectedSkill && (
           <section className="page-content session-page">
-            <div className="page-heading compact-heading">            <div><button className="back-link" onClick={() => navigateTo('select')}>← Skill library</button><div className="eyebrow">{selectedSkill.categoryName.toUpperCase()} · LEVEL {selectedSkill.level}</div><h1>{selectedSkill.name}</h1><p className="lede">{selectedSkill.description}</p></div></div>
+            <div className="page-heading compact-heading">            <div><button className="back-link" onClick={() => navigateTo(freestyleMode ? 'home' : 'select')}>← {freestyleMode ? 'Overview' : comboMode ? 'Combo editor' : 'Skill library'}</button><div className="eyebrow">{freestyleMode ? 'FREESTYLE · CONTINUOUS LOCAL POSE ANALYSIS' : comboMode ? 'HANDSTAND COMBO · LOCAL POSE ANALYSIS' : `${selectedSkill.categoryName.toUpperCase()} · LEVEL ${selectedSkill.level}`}</div><h1>{freestyleMode ? 'Move freely' : comboMode ? 'Record your combo' : selectedSkill.name}</h1><p className="lede">{freestyleMode ? 'No exercise selection needed. Record a sequence and review only the pose patterns supported by the current model.' : comboMode ? 'Perform the sequence in order. The camera estimates entry, hold and push-up phases; uncertain transitions remain unconfirmed.' : selectedSkill.description}</p></div></div>
             <div className="session-layout">
               <div className="session-left">
                 <div className="camera-stage">
@@ -615,19 +851,19 @@ function App() {
                   })}{landmarks.map((point, index) => point.visibility > 0.45 ? <circle key={index} cx={point.x * poseVideoWidth} cy={point.y * poseVideoHeight} r={poseVideoWidth * .009} /> : null)}</svg>}
                   {!cameraActive && mediaMode === 'camera' && <div className="camera-placeholder"><div className="camera-placeholder-icon"><Video size={26} /></div><strong>Set up your camera</strong><span>Position your phone so your full body stays in frame.</span><button className="button-primary" onClick={() => void startCamera()} disabled={loading}><Video size={16} /> Enable camera</button></div>}
                   {mediaMode === 'upload' && !uploadedUrl && <div className="camera-placeholder"><div className="camera-placeholder-icon"><Upload size={26} /></div><strong>Choose a video</strong><span>MP4 and WebM are supported where your browser can decode them.</span><button className="button-primary" onClick={() => fileInputRef.current?.click()}><Upload size={16} /> Browse files</button></div>}
-                  {cameraActive && <div className="camera-topline"><span><i className={recording ? 'recording-dot' : 'ready-dot'} />{recording ? paused ? 'PAUSED' : 'RECORDING' : analysisRunning ? 'ANALYZING' : 'CAMERA READY'}</span><span>FULL BODY · SIDE VIEW</span></div>}
+                  {cameraActive && <div className="camera-topline"><span><i className={recording ? 'recording-dot' : 'ready-dot'} />{recording ? paused ? 'PAUSED' : 'RECORDING' : analysisRunning ? 'ANALYZING' : 'CAMERA READY'}</span><span>{freestyleMode ? 'KEEP FULL BODY VISIBLE' : 'FULL BODY · SIDE VIEW'}</span></div>}
                   {countdown > 0 && <div className="countdown-overlay"><span>GET READY</span><strong>{countdown}</strong></div>}
                   {paused && <div className="paused-overlay"><span>RECORDING PAUSED</span></div>}
                   {recording && <div className="recording-clock"><span className="recording-dot" /> REC&nbsp; {formatTime(elapsed)}</div>}
-                  {analysisRunning && <div className="live-metric-chip">{selectedSkill.type === 'dynamic' ? <><span>REPS</span><strong>{metrics.validReps}</strong></> : <><span>HOLD</span><strong>{formatTime(metrics.currentHold)}</strong></>}</div>}
+                  {analysisRunning && <div className="live-metric-chip">{freestyleMode ? <><span>POSE PATTERN · REPS</span><strong>{metrics.confidence < 0.45 ? 'UNCLEAR' : metrics.validReps}</strong></> : comboMode ? <><span>HSPU · HOLD</span><strong>{metrics.validReps} · {formatTime(metrics.currentHold)}</strong></> : selectedSkill.type === 'dynamic' ? <><span>REPS</span><strong>{metrics.validReps}</strong></> : <><span>HOLD</span><strong>{formatTime(metrics.currentHold)}</strong></>}</div>}
                 </div>
-                {analysisRunning && metrics.confidence < 0.3 && <div className="perspective-warning" role="status"><CircleAlert size={15} /><span>Pose landmarks are difficult to read. Adjust lighting and framing; recommended view: {selectedSkill.camera}</span></div>}
+                {analysisRunning && metrics.confidence < 0.3 && <div className="perspective-warning" role="status"><CircleAlert size={15} /><span>{freestyleMode ? 'Too few visible body landmarks for useful freestyle analysis. Improve lighting and keep your full body in frame.' : `Pose landmarks are difficult to read. Adjust lighting and framing; recommended view: ${selectedSkill.camera}`}</span></div>}
                 <div className="camera-controls">
                   {mediaMode === 'camera' ? <>
                     <button className="camera-switch" onClick={() => void startCamera(cameraFacing === 'environment' ? 'user' : 'environment')} disabled={!cameraActive || recording || loading}><RotateCcw size={16} /> Flip camera</button>
                     {!cameraActive ? <button className="button-primary" onClick={() => void startCamera()} disabled={loading}>{loading ? <><span className="spinner" />{loadingMessage}</> : <><Video size={16} /> Start camera</>}</button>
-                      : !recording ? <button className="button-primary record-button" onClick={() => void beginRecording()} disabled={loading || countdown > 0}>{loading ? <><span className="spinner" />{loadingMessage || 'Loading model…'}</> : <><span className="record-dot" /> Record session</>}</button>
-                        : <div className="record-buttons">{paused ? <button className="button-primary" onClick={resumeRecording}><Play size={15} /> Resume</button> : <button className="button-secondary" onClick={pauseRecording}><span className="pause-symbol" /> Pause</button>}<button className="button-danger" onClick={stopRecording}><Square size={14} fill="currentColor" /> Finish</button></div>}
+                      : !recording ? <button className="button-primary record-button" onClick={() => void beginRecording()} disabled={loading || countdown > 0}>{loading ? <><span className="spinner" />{loadingMessage || 'Loading model…'}</> : <><span className="record-dot" /> {freestyleMode ? 'Start Freestyle' : 'Record session'}</>}</button>
+                        : <div className="record-buttons">{paused ? <button className="button-primary" onClick={resumeRecording}><Play size={15} /> Resume</button> : <button className="button-secondary" onClick={pauseRecording}><span className="pause-symbol" /> Pause</button>}<button className="button-danger" onClick={stopRecording}><Square size={14} fill="currentColor" /> {freestyleMode ? 'Stop Freestyle' : 'Finish'}</button></div>}
                     <button className="upload-inline" onClick={() => fileInputRef.current?.click()} disabled={recording || loading}><Upload size={16} /> Upload</button>
                   </> : <>
                     <button className="camera-switch" onClick={() => { setMediaMode('camera'); setUploadedVideo(null) }} disabled={loading}><Video size={16} /> Use camera</button>
@@ -636,11 +872,14 @@ function App() {
                   </>}
                   <input ref={fileInputRef} type="file" accept="video/*" hidden onChange={(event) => { selectVideo(event.target.files?.[0]); event.target.value = '' }} />
                 </div>
-                {analysisRunning && <div className="live-readout"><div><span>POSE CONFIDENCE</span><strong>{Math.round(metrics.confidence * 100)}%</strong></div><div><span>{selectedSkill.type === 'dynamic' ? 'COMPLETED REPS' : 'LONGEST HOLD'}</span><strong>{selectedSkill.type === 'dynamic' ? metrics.validReps : formatTime(metrics.longestHold)}</strong></div><div><span>VALID HOLD TIME</span><strong>{formatTime(metrics.totalHold)}</strong></div></div>}
+                {analysisRunning && <div className="live-readout"><div><span>POSE CONFIDENCE</span><strong>{Math.round(metrics.confidence * 100)}%{freestyleMode && metrics.confidence < 0.45 ? ' · LOW' : ''}</strong></div><div><span>{freestyleMode ? 'VISIBLE REP PATTERNS' : comboMode || selectedSkill.type === 'dynamic' ? 'COMPLETED REPS' : 'LONGEST HOLD'}</span><strong>{freestyleMode || comboMode || selectedSkill.type === 'dynamic' ? metrics.validReps : formatTime(metrics.longestHold)}</strong></div><div><span>{comboMode || freestyleMode ? 'ESTIMATED HOLD TIME' : 'VALID HOLD TIME'}</span><strong>{formatTime(metrics.totalHold)}</strong></div></div>}
                 <div className="camera-note"><ShieldCheck size={16} /><span>Video analysis runs locally on this device. No video is uploaded.</span></div>
               </div>
               <aside className="session-right">
-                <section className="panel setup-panel"><div className="panel-heading"><div><div className="eyebrow">SESSION SETUP</div><h2>Make it yours</h2></div></div>
+                <section className="panel setup-panel"><div className="panel-heading"><div><div className="eyebrow">{freestyleMode ? 'FREESTYLE MODE' : comboMode ? 'COMBO ORDER' : 'SESSION SETUP'}</div><h2>{freestyleMode ? 'Automatic pattern scan' : comboMode ? 'Planned sequence' : 'Make it yours'}</h2></div></div>
+                  {freestyleMode ? <><p className="freestyle-description">Freestyle starts without selecting a skill. It searches only for broad pose patterns already supported by the local model.</p><ul className="freestyle-support-list"><li>Handstand holds and visible HSPU elbow cycles</li><li>Horizontal front-lever-like body positions</li><li>Horizontal push-up patterns and elbow cycles</li></ul><div className="disclaimer"><CircleAlert size={15} /><p>Press intent, push-up variations, wall contact, pull-ups and muscle-ups are not reliably identifiable from these landmarks alone. Unclassified periods are labeled unknown, not guessed.</p></div></>
+                    : comboMode ? <><ol className="combo-session-order">{comboSteps.map((step) => <li key={step.id}><span>{comboKindNames[step.kind]}</span><strong>{step.name}</strong><small>{step.description || `${step.repetitions} rep${step.repetitions === 1 ? '' : 's'}${step.holdSeconds > 0 ? ` · ${step.holdSeconds}s hold` : ''}`}</small></li>)}</ol><div className="disclaimer"><CircleAlert size={15} /><p>Automatic labels are estimates. The final timeline asks for confirmation where pose cues are ambiguous.</p></div></>
+                    : <>
                   {selectedSkill.type === 'dynamic' && <div className="form-row"><label htmlFor="target-reps">Rep target</label><div className="number-control"><button onClick={() => setTargetReps(Math.max(1, targetReps - 1))} aria-label="Decrease rep target">−</button><input id="target-reps" type="number" min="1" max="50" value={targetReps} onChange={(event) => setTargetReps(Math.min(50, Math.max(1, Number(event.target.value) || 1)))} /><button onClick={() => setTargetReps(Math.min(50, targetReps + 1))} aria-label="Increase rep target">+</button></div></div>}
                   {selectedSkill.type !== 'dynamic' && <><label className="toggle-row"><span><strong>Measure valid holds</strong><small>Track only time in a qualified position</small></span><input type="checkbox" checked={measureHold} onChange={(event) => setMeasureHold(event.target.checked)} /><i /></label>
                     {measureHold && <div className="form-row"><label htmlFor="target-hold">Target hold</label><div className="number-control"><button onClick={() => setTargetHold(Math.max(5, targetHold - 5))}>−</button><input id="target-hold" type="number" min="5" max="300" step="5" value={targetHold} onChange={(event) => setTargetHold(Math.min(300, Math.max(5, Number(event.target.value) || 5)))} /><button onClick={() => setTargetHold(Math.min(300, targetHold + 5))}>+</button></div></div>}</>}
@@ -649,6 +888,7 @@ function App() {
                   <div className="setup-divider" /><div className="checklist-heading"><span className="mini-check"><Check size={12} /></span><strong>Technique checkpoints</strong></div>
                   <ul className="checkpoint-list">{selectedSkill.checkpoints.map((checkpoint) => <li key={checkpoint}><span />{checkpoint}</li>)}</ul>
                   <div className="camera-position"><span className="camera-position-icon"><Video size={16} /></span><div><small>RECOMMENDED CAMERA</small><p>{selectedSkill.camera}</p></div></div>
+                  </>}
                 </section>
                 <div className="disclaimer"><CircleAlert size={15} /><p>2D pose estimates are directional, not clinical measurements. Camera angle and occlusion can affect results.</p></div>
               </aside>
@@ -658,13 +898,22 @@ function App() {
 
         {screen === 'report' && activeSession && (
           <section className="page-content report-page">
-            <div className="report-top"><div><button className="back-link" onClick={showHistory}>← Training log</button><div className="eyebrow">SESSION COMPLETE · {new Date(activeSession.date).toLocaleDateString(undefined, { dateStyle: 'medium' })}</div><h1>{activeSession.skillName}</h1><p className="lede">Your analysis is ready. Treat 2D estimates as training feedback, not a precise biomechanical measurement.</p><p className="report-settings">{activeSkill?.type === 'dynamic' ? `${activeSession.settings.targetReps} rep target · ` : ''}{activeSession.settings.measureHold ? `${activeSession.settings.targetHold}s hold target · ±${activeSession.settings.positionTolerance}° tolerance` : 'hold timer off'} · {activeSession.settings.smoothingStrength}% smoothing{activeSession.settings.focus ? ` · Focus: ${activeSession.settings.focus}` : ''}</p></div><button className="button-primary" onClick={resetWorkflow}><RotateCcw size={16} /> Analyze again</button></div>
-            <div className="analysis-context panel"><div><span className="eyebrow">SELECTED EXERCISE</span><strong>{activeSession.skillName}</strong><small>{activeSkill?.categoryName ?? 'Calisthenics'} · Level {activeSkill?.level ?? '—'} · Exercise identity is selected, not independently recognized by the camera.</small></div>{activeSkill && <p><Video size={15} /> Recommended view: {activeSkill.camera}</p>}</div>
+            <div className="report-top"><div><button className="back-link" onClick={showHistory}>← Training log</button><div className="eyebrow">SESSION COMPLETE · {new Date(activeSession.date).toLocaleDateString(undefined, { dateStyle: 'medium' })}</div><h1>{activeSession.skillName}</h1><p className="lede">Your analysis is ready. Treat 2D estimates as training feedback, not a precise biomechanical measurement.</p>{activeSession.freestyle ? <p className="report-settings">{formatTime(activeSession.freestyle.duration)} duration · {activeSession.freestyle.segments.length} analyzed intervals · {activeSession.freestyle.reliableRepetitions} higher-confidence repetitions</p> : activeSession.combo ? <p className="report-settings">Sequence of {activeSession.combo.segments.length} planned steps · {formatTime(activeSession.combo.duration)} recording duration · local analysis</p> : <p className="report-settings">{activeSkill?.type === 'dynamic' ? `${activeSession.settings.targetReps} rep target · ` : ''}{activeSession.settings.measureHold ? `${activeSession.settings.targetHold}s hold target · ±${activeSession.settings.positionTolerance}° tolerance` : 'hold timer off'} · {activeSession.settings.smoothingStrength}% smoothing{activeSession.settings.focus ? ` · Focus: ${activeSession.settings.focus}` : ''}</p>}</div><button className="button-primary" onClick={resetWorkflow}><RotateCcw size={16} /> Analyze again</button></div>
+            <div className="analysis-context panel"><div><span className="eyebrow">{activeSession.freestyle ? 'AUTOMATIC FREESTYLE SCAN' : activeSession.combo ? 'COMBO SEQUENCE' : 'SELECTED EXERCISE'}</span><strong>{activeSession.skillName}</strong><small>{activeSession.freestyle ? activeSession.freestyle.note : activeSession.combo ? 'Each step is estimated from pose cues, not independently recognized.' : `${activeSkill?.categoryName ?? 'Calisthenics'} · Level ${activeSkill?.level ?? '—'} · Exercise identity is selected, not independently recognized by the camera.`}</small></div>{activeSkill && !activeSession.freestyle && <p><Video size={15} /> Recommended view: {activeSkill.camera}</p>}</div>
             {activeSession.report.insufficientConfidence && <div className="confidence-alert"><CircleAlert size={18} /><div><strong>Not enough reliable pose evidence for a score</strong><span>Check lighting and framing. Recommended view: {activeSkill?.camera ?? 'keep the full body visible'}. No score was invented.</span></div></div>}
             <div className="report-summary">
-              <div className="score-card panel"><div className="eyebrow">TECHNIQUE SCORE</div><div className={`score-number ${activeSession.report.score === null ? 'no-score' : ''}`}>{activeSession.report.score ?? '—'}<small>{activeSession.report.score !== null && '/100'}</small></div><div className="score-caption">{activeSession.report.score === null ? 'Insufficient confidence' : 'Estimated from visible pose frames'}</div><div className="score-bar"><i style={{ width: `${activeSession.report.score ?? 0}%` }} /></div><div className="score-foot"><span>POSE CONFIDENCE</span><strong>{activeSession.report.confidence}%</strong></div></div>
+              <div className="score-card panel"><div className="eyebrow">{activeSession.freestyle ? 'TECHNIQUE SCORE' : activeSession.combo ? 'VALIDATED SCORE' : 'TECHNIQUE SCORE'}</div><div className={`score-number ${activeSession.report.score === null ? 'no-score' : ''}`}>{activeSession.report.score ?? '—'}<small>{activeSession.report.score !== null && '/100'}</small></div><div className="score-caption">{activeSession.freestyle ? 'No overall score; inspect per-segment cues' : activeSession.combo ? 'No validated combo score is produced' : activeSession.report.score === null ? 'Insufficient confidence' : 'Estimated from visible pose frames'}</div><div className="score-bar"><i style={{ width: `${activeSession.report.score ?? 0}%` }} /></div><div className="score-foot"><span>POSE CONFIDENCE</span><strong>{activeSession.report.confidence}%</strong></div></div>
               <div className="result-metrics panel">
-                {activeSkill?.type === 'dynamic' ? <>
+                {activeSession.freestyle ? <>
+                  <Metric label="Higher-confidence reps" value={String(activeSession.freestyle.reliableRepetitions)} helper="Only completed cycles in higher-visibility intervals." icon={<Activity size={17} />} />
+                  <Metric label="All estimated reps" value={String(activeSession.report.validReps)} helper={`Estimated partial phases · ${activeSession.report.partialReps}`} icon={<ArrowDownRight size={17} />} />
+                  <Metric label="Measured hold time" value={formatTime(activeSession.report.totalHold)} helper="Estimated static-looking intervals, not proof of balance." icon={<Clock3 size={17} />} />
+                  <Metric label="Analyzed pose frames" value={`${activeSession.freestyle.framesAnalyzed}`} helper={`${activeSession.freestyle.lowConfidenceFrames} frames had low or missing landmark confidence.`} icon={<ShieldCheck size={17} />} />
+                </> : activeSession.combo ? <>
+                  <Metric label="Detected HSPU cycles" value={String(activeSession.report.validReps)} helper={`Incomplete phase · ${activeSession.report.partialReps}`} icon={<Activity size={17} />} />
+                  <Metric label="Estimated inverted time" value={formatTime(activeSession.report.totalHold)} helper="Inverted pose interval; not proof of balance or a stationary hold." icon={<Clock3 size={17} />} />
+                  <Metric label="Pose frames analyzed" value={String(activeSession.report.framesAnalyzed)} helper={`Mean landmark confidence · ${activeSession.report.confidence}%`} icon={<ShieldCheck size={17} />} />
+                </> : activeSkill?.type === 'dynamic' ? <>
                   <Metric label="Detected repetitions" value={String(activeSession.report.validReps)} helper={`Incomplete phases · ${activeSession.report.partialReps}`} icon={<Activity size={17} />} />
                   {activeSession.report.movementRange !== 'not-applicable' && <Metric label="Observed elbow movement" value={movementRangeLabel(activeSession.report.movementRange)} helper="Approximate 2D angle change; not a physical range measurement." icon={<ArrowDownRight size={17} />} />}
                   <Metric label="Pose frames analyzed" value={String(activeSession.report.framesAnalyzed)} helper={`Mean landmark confidence · ${activeSession.report.confidence}%`} icon={<ShieldCheck size={17} />} />
@@ -674,8 +923,29 @@ function App() {
                   <Metric label="Pose frames analyzed" value={String(activeSession.report.framesAnalyzed)} helper={`Mean landmark confidence · ${activeSession.report.confidence}%`} icon={<Activity size={17} />} />
                 </>}
               </div>
-              {activeSession.video && videoUrl && <div className="report-video panel"><div className="panel-heading"><div><div className="eyebrow">SESSION RECORDING</div><h2>Review your movement</h2></div></div><video controls playsInline src={videoUrl} /></div>}
+              {activeSession.video && videoUrl && <div className="report-video panel"><div className="panel-heading"><div><div className="eyebrow">SESSION RECORDING</div><h2>Review your movement</h2></div></div><video ref={reportVideoRef} controls playsInline src={videoUrl} /></div>}
             </div>
+            {activeFreestyle && <section className="combo-timeline panel freestyle-timeline"><div className="panel-heading"><div><div className="eyebrow">FREESTYLE TIMELINE · {formatTime(activeFreestyle.duration)}</div><h2>Detected patterns</h2></div><div className="freestyle-timeline-actions"><span className="combo-order-status">{activeFreestyle.framesAnalyzed < 12 ? 'Insufficient camera evidence' : `${activeFreestyle.segments.length} intervals · no overall score`}</span><button className="button-secondary" onClick={addFreestyleSegment}><Plus size={14} /> Add interval</button></div></div>
+              {activeFreestyle.framesAnalyzed < 12 && activeFreestyle.segments.length === 0 && <p className="combo-intro">The camera did not provide enough confident pose frames. The timeline is intentionally empty rather than guessing skills.</p>}
+              {(activeFreestyle.framesAnalyzed >= 12 || activeFreestyle.segments.length > 0) && <><p className="combo-intro">{activeFreestyle.framesAnalyzed < 12 ? 'Only a few clear intervals were found; treat them as unconfirmed and review manually. ' : ''}{activeFreestyle.note}</p>{activeFreestyle.segments.length === 0 && <p className="combo-intro">No supported movement pattern was found in this recording. This does not mean no exercise occurred; review the video or add an interval manually.</p>}<div className="timeline-track" aria-label="Freestyle movement timeline">{activeFreestyle.segments.map((segment, index) => <button key={segment.id} className={`timeline-block ${segment.status === 'unclear' ? 'uncertain' : 'detected'} ${selectedFreestyleSegment === segment.id ? 'active' : ''}`} style={{ left: `${activeFreestyle.duration ? segment.start / activeFreestyle.duration * 100 : 0}%`, width: `${activeFreestyle.duration ? Math.max(1, (segment.end - segment.start) / activeFreestyle.duration * 100) : 1}%` }} onClick={() => { setSelectedFreestyleSegment(segment.id); if (reportVideoRef.current) reportVideoRef.current.currentTime = segment.start }} title={`${segment.name}: ${formatTime(segment.start)}–${formatTime(segment.end)}`}>{index + 1}</button>)}</div>
+                <div className="timeline-legend"><span><i className="timeline-key detected" />Pose pattern estimate</span><span><i className="timeline-key uncertain" />Unknown / uncertain</span><span>Click a segment to seek the recording</span></div>
+                <div className="timeline-segments">{activeFreestyle.segments.map((segment, index) => <div className={`timeline-segment ${selectedFreestyleSegment === segment.id ? 'selected' : ''}`} key={segment.id}>
+                  <div className="timeline-segment-heading"><span>{String(index + 1).padStart(2, '0')}</span><div><strong>{segment.name}</strong><small>{segment.confirmed ? 'Manually confirmed' : `${segment.status === 'reliable' ? 'Higher-confidence pattern' : segment.status === 'unclear' ? 'Unclear pattern' : 'Estimated pattern'} · ${Math.round(segment.confidence)}% pose visibility`}</small></div><button className="button-secondary" onClick={() => { setSelectedFreestyleSegment(segment.id); if (reportVideoRef.current) reportVideoRef.current.currentTime = segment.start }}>View</button><button className="icon-button destructive" aria-label={`Remove ${segment.name} from timeline`} onClick={() => removeFreestyleSegment(segment.id)}><Trash2 size={14} /></button></div>
+                  <p>{segment.feedback}{segment.alignment === null ? '' : ` Estimated alignment signal: ${segment.alignment}/100 (not a technique score).`}</p>
+                  <div className="timeline-edit"><label>Skill label<select value={segment.kind} onChange={(event) => { const kind = event.target.value as FreestyleSkillKind; const label = freestyleLabels.find((item) => item.kind === kind)?.label ?? 'Unclassified movement'; updateFreestyleSegment(segment.id, { kind, name: label, confirmed: true }) }}>{freestyleLabels.map((item) => <option key={item.kind} value={item.kind}>{item.label}</option>)}</select></label><label>Start (sec)<input type="number" min="0" max={activeFreestyle.duration} step="0.1" value={segment.start.toFixed(1)} onChange={(event) => updateFreestyleSegment(segment.id, { start: Math.min(segment.end, Math.max(0, Number(event.target.value) || 0)), confirmed: true })} /></label><label>End (sec)<input type="number" min={segment.start} max={activeFreestyle.duration} step="0.1" value={segment.end.toFixed(1)} onChange={(event) => updateFreestyleSegment(segment.id, { end: Math.min(activeFreestyle.duration, Math.max(segment.start, Number(event.target.value) || 0)), confirmed: true })} /></label>{segment.kind !== 'handstand' && segment.kind !== 'unknown' && <label>Reps<input type="number" min="0" max="99" value={segment.repetitions} onChange={(event) => updateFreestyleSegment(segment.id, { repetitions: Math.max(0, Math.min(99, Number(event.target.value) || 0)), confirmed: true })} /></label>}{(segment.kind === 'handstand' || segment.kind === 'front-lever') && <label>Hold (sec)<input type="number" min="0" max={activeFreestyle.duration} step="0.1" value={segment.holdSeconds.toFixed(1)} onChange={(event) => updateFreestyleSegment(segment.id, { holdSeconds: Math.max(0, Number(event.target.value) || 0), confirmed: true })} /></label>}<label className="timeline-confirm"><input type="checkbox" checked={segment.confirmed} onChange={(event) => updateFreestyleSegment(segment.id, { confirmed: event.target.checked })} /> Confirmed</label></div>
+                  <small className="freestyle-segment-stats">{segment.repetitions ? `${segment.repetitions} repetitions · ` : ''}{segment.partialRepetitions ? `${segment.partialRepetitions} partial · ` : ''}{segment.holdSeconds > 0 ? `${formatTime(segment.holdSeconds)} estimated hold` : 'no static hold measured'}</small>
+                </div>)}</div></>}
+            </section>}
+            {activeSession.combo && <section className="combo-timeline panel"><div className="panel-heading"><div><div className="eyebrow">COMBO TIMELINE · {formatTime(activeSession.combo.duration)}</div><h2>Review and correct each segment</h2></div><span className="combo-order-status">{activeSession.combo.sequenceFollowed === null ? 'Order not verifiable' : activeSession.combo.sequenceFollowed ? 'Estimated order matches' : 'Order differs or is incomplete'}</span></div>
+              <p className="combo-intro">{activeSession.combo.note}</p>
+              <div className="timeline-track" aria-label="Detected combo timeline">{activeSession.combo.segments.map((segment, index) => <button key={segment.stepId} className={`timeline-block ${segment.detected ? 'detected' : 'uncertain'} ${selectedTimelineStep === segment.stepId ? 'active' : ''}`} style={{ left: `${activeSession.combo?.duration ? segment.start / activeSession.combo.duration * 100 : 0}%`, width: `${activeSession.combo?.duration ? Math.max(1, (segment.end - segment.start) / activeSession.combo.duration * 100) : 1}%` }} onClick={() => { setSelectedTimelineStep(segment.stepId); if (reportVideoRef.current) reportVideoRef.current.currentTime = segment.start }} title={`${segment.name}: ${formatTime(segment.start)}–${formatTime(segment.end)}`}>{index + 1}</button>)}</div>
+              <div className="timeline-legend"><span><i className="timeline-key detected" />Estimated pose cue</span><span><i className="timeline-key uncertain" />Unconfirmed / not detected</span><span>Click a segment to seek the recording</span></div>
+              <div className="timeline-segments">{activeSession.combo.segments.map((segment, index) => <div className={`timeline-segment ${selectedTimelineStep === segment.stepId ? 'selected' : ''}`} key={segment.stepId}>
+                <div className="timeline-segment-heading"><span>{String(index + 1).padStart(2, '0')}</span><div><strong>{segment.name}</strong><small>{segment.confirmed ? 'Manually confirmed' : segment.detected ? `Estimated · ${segment.kind === 'hspu' ? `${segment.repetitions}/${segment.targetRepetitions} cycles` : `${formatTime(Math.max(0, segment.end - segment.start))} segment`}` : 'Unclear · manual confirmation needed'}</small></div><button className="button-secondary" onClick={() => { setSelectedTimelineStep(segment.stepId); if (reportVideoRef.current) reportVideoRef.current.currentTime = segment.start }}>View</button></div>
+                <p>{segment.description && <><strong>{segment.description} </strong></>}{segment.feedback}</p>
+                <div className="timeline-edit"><label>Start (sec)<input type="number" min="0" max={activeSession.combo?.duration ?? 0} step="0.1" value={segment.start.toFixed(1)} onChange={(event) => updateComboSegment(segment.stepId, { start: Math.min(segment.end, Math.max(0, Number(event.target.value) || 0)), confirmed: true })} /></label><label>End (sec)<input type="number" min={segment.start} max={activeSession.combo?.duration ?? 0} step="0.1" value={segment.end.toFixed(1)} onChange={(event) => updateComboSegment(segment.stepId, { end: Math.min(activeSession.combo?.duration ?? 0, Math.max(segment.start, Number(event.target.value) || 0)), confirmed: true })} /></label><label className="timeline-confirm"><input type="checkbox" checked={segment.confirmed} onChange={(event) => updateComboSegment(segment.stepId, { confirmed: event.target.checked })} /> I confirm this segment</label></div>
+              </div>)}</div>
+            </section>}
             {reportLimitations.length > 0 && <div className="analysis-limitations panel"><div className="eyebrow"><CircleAlert size={14} /> MEASUREMENT LIMITS</div>{reportLimitations.map((limitation) => <p key={limitation}>{limitation}</p>)}</div>}
             <div className="report-details">
               <div className="panel criteria-panel"><div className="panel-heading"><div><div className="eyebrow">SKILL-SPECIFIC BREAKDOWN</div><h2>Technique signals</h2></div></div>

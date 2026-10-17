@@ -55,6 +55,78 @@ export interface TrainingSession {
     smoothingStrength: number
   }
   video?: Blob
+  combo?: ComboAnalysis
+  freestyle?: FreestyleAnalysis
+}
+
+export type ComboStepKind = 'press' | 'hold' | 'hspu'
+
+export interface ComboStep {
+  id: string
+  kind: ComboStepKind
+  name: string
+  repetitions: number
+  holdSeconds: number
+  description: string
+}
+
+export interface ComboSegment {
+  stepId: string
+  name: string
+  kind: ComboStepKind
+  start: number
+  end: number
+  repetitions: number
+  targetRepetitions: number
+  targetHoldSeconds: number
+  description: string
+  detected: boolean
+  confirmed: boolean
+  confidence: 'estimated' | 'unconfirmed'
+  feedback: string
+}
+
+export interface ComboAnalysis {
+  segments: ComboSegment[]
+  sequenceFollowed: boolean | null
+  duration: number
+  note: string
+}
+
+export type FreestyleSkillKind =
+  | 'handstand'
+  | 'handstand-push-up'
+  | 'front-lever'
+  | 'front-lever-raise'
+  | 'push-up'
+  | 'press-to-handstand'
+  | 'pull-up'
+  | 'muscle-up'
+  | 'unknown'
+
+export interface FreestyleSegment {
+  id: string
+  kind: FreestyleSkillKind
+  name: string
+  start: number
+  end: number
+  repetitions: number
+  partialRepetitions: number
+  holdSeconds: number
+  confidence: number
+  status: 'reliable' | 'estimated' | 'unclear'
+  alignment: number | null
+  feedback: string
+  confirmed: boolean
+}
+
+export interface FreestyleAnalysis {
+  duration: number
+  framesAnalyzed: number
+  lowConfidenceFrames: number
+  segments: FreestyleSegment[]
+  reliableRepetitions: number
+  note: string
 }
 
 export interface PosePoint {
